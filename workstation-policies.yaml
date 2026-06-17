@@ -1,0 +1,19 @@
+# SimpleRose workstation cnspec policy bundles (v1)
+# Used by NinjaOne for unregistered (--incognito) policy scans
+version: "1.0"
+updated: "2026-06-17"
+source_fork: https://github.com/simpleroseinc/cnspec
+upstream: https://github.com/mondoohq/cnspec
+
+policies:
+  linux:
+    file: content/mondoo-linux-workstation-security.mql.yaml
+    url: https://raw.githubusercontent.com/simpleroseinc/cnspec/main/content/mondoo-linux-workstation-security.mql.yaml
+
+  windows:
+    file: content/mondoo-windows-workstation-security.mql.yaml
+    url: https://raw.githubusercontent.com/simpleroseinc/cnspec/main/content/mondoo-windows-workstation-security.mql.yaml
+
+  macos:
+    file: content/mondoo-macos-security.mql.yaml
+    url: https://raw.githubusercontent.com/simpleroseinc/cnspec/main/content/mondoo-macos-security.mql.yaml
