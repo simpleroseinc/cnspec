@@ -3,7 +3,7 @@
 policies:
   - uid: mondoo-openstack-security
     name: Mondoo OpenStack Security
-    version: 1.1.2
+    version: 1.4.0
     license: BUSL-1.1
     tags:
       mondoo.com/category: security
@@ -40,17 +40,23 @@ policies:
           - uid: mondoo-openstack-security-app-credentials-restricted
           - uid: mondoo-openstack-security-app-credentials-have-expiry
           - uid: mondoo-openstack-security-trust-impersonation-expiry
+          - uid: mondoo-openstack-security-user-mfa-enabled
+          - uid: mondoo-openstack-security-user-lockout-not-bypassed
       - title: Compute (Nova)
         checks:
           - uid: mondoo-openstack-security-server-uses-keypair
           - uid: mondoo-openstack-security-server-has-security-group
+          - uid: mondoo-openstack-security-server-not-internet-reachable
       - title: Network (Neutron)
         checks:
           - uid: mondoo-openstack-security-no-unrestricted-ssh
           - uid: mondoo-openstack-security-no-unrestricted-rdp
+          - uid: mondoo-openstack-security-no-unrestricted-winrm
           - uid: mondoo-openstack-security-no-unrestricted-db-ports
+          - uid: mondoo-openstack-security-no-unrestricted-mgmt-ports
           - uid: mondoo-openstack-security-no-all-ports-open
           - uid: mondoo-openstack-security-port-security-enabled
+          - uid: mondoo-openstack-security-firewall-policy-audited
       - title: Block Storage (Cinder)
         checks:
           - uid: mondoo-openstack-security-volume-encrypted
@@ -64,6 +70,8 @@ policies:
       - title: Load Balancers (Octavia)
         checks:
           - uid: mondoo-openstack-security-listener-modern-tls
+          - uid: mondoo-openstack-security-listener-no-plaintext-internet
+          - uid: mondoo-openstack-security-listener-restricts-source-cidrs
       - title: Shared File Systems (Manila)
         checks:
           - uid: mondoo-openstack-security-share-not-public
@@ -72,9 +80,11 @@ policies:
         checks:
           - uid: mondoo-openstack-security-cluster-template-tls-enabled
           - uid: mondoo-openstack-security-cluster-template-no-insecure-registry
+          - uid: mondoo-openstack-security-cluster-template-no-floating-ip
       - title: Databases (Trove)
         checks:
           - uid: mondoo-openstack-security-database-not-public
+          - uid: mondoo-openstack-security-database-supported-version
     scoring_system: highest impact
 queries:
   - uid: mondoo-openstack-security-app-credentials-restricted
@@ -195,6 +205,248 @@ queries:
     mql: |
       terraform.state.resources.where(type == "openstack_identity_application_credential_v3").all(
         values.unrestricted != true
+      )
+
+  - uid: mondoo-openstack-security-user-mfa-enabled
+    title: Ensure Keystone users have multi-factor authentication enabled
+    impact: 85
+    tags:
+      compliance/bsi-sys-1-5: false
+      compliance/csa-cloud-controls-matrix-4: cloud-controls-matrix-4-iam-14
+      compliance/dora: dora-art-9
+      compliance/hipaa: hipaa-security-ss164-312-d-person-or-entity-authentication
+      compliance/iso-27001-2022: iso-27001-2022-a-8-5
+      compliance/nis-2: nis-2-21-2-j
+      compliance/nist-csf-1: nist-csf-1-pr-ac-7
+      compliance/nist-csf-2: nist-csf-2-pr-aa-03
+      compliance/nist-sp-800-53-rev5: nist-sp-800-53-rev5-ia-2
+      compliance/nist-sp-800-171: nist-sp-800-171--3-5-3
+      compliance/pci-dss-4: pcidss-requirement-8-4-2
+      compliance/soc2-2017: soc2-control-cc6-1-4
+      compliance/vda-isa-5: vda-isa-5-4-1-2
+    variants:
+      - uid: mondoo-openstack-security-user-mfa-enabled-openstack
+        tags:
+          mondoo.com/filter-title: OpenStack Project
+          mondoo.com/filter-icon: openstack
+      - uid: mondoo-openstack-security-user-mfa-enabled-terraform-hcl
+        tags:
+          mondoo.com/filter-title: Terraform HCL
+          mondoo.com/filter-icon: terraform
+      - uid: mondoo-openstack-security-user-mfa-enabled-terraform-plan
+        tags:
+          mondoo.com/filter-title: Terraform Plan
+          mondoo.com/filter-icon: terraform
+      - uid: mondoo-openstack-security-user-mfa-enabled-terraform-state
+        tags:
+          mondoo.com/filter-title: Terraform State
+          mondoo.com/filter-icon: terraform
+    docs:
+      desc: |
+        This check ensures that every Keystone user has `multi_factor_auth_enabled` set to true. Without multi-factor authentication, a single password is the only barrier to a user's access, so a phished, reused, or brute-forced password grants an attacker the full set of roles the account holds.
+
+        **Why this matters**
+
+        - **Password compromise is common:** Credential phishing, reuse, and brute force routinely defeat single-factor authentication, and a privileged Keystone account is a high-value target.
+        - **Roles travel with the account:** A compromised user inherits every project and domain role assigned to it, so the blast radius of a stolen password can be large.
+        - **Defense beyond the password:** Requiring a second factor means a leaked password alone is not enough to authenticate.
+
+        **Risk mitigation**
+
+        - **Account takeover:** A second factor blocks an attacker who has only obtained the user's password.
+        - **Lateral movement:** Containing account compromise at the authentication step limits an attacker's ability to assume the account's roles across projects.
+
+        Service accounts that authenticate with application credentials rather than interactive logins may be exempted where MFA does not apply to their flow.
+      audit: |
+        ### Audit via Horizon
+
+        1. Sign in to the OpenStack Horizon dashboard as an administrator.
+        2. Open **Identity** then **Users**.
+        3. Select each user and review whether multi-factor authentication is enabled.
+
+        A passing result shows multi-factor authentication enabled for every user; a failing result shows one or more users without it.
+
+        ### Audit via CLI
+
+        Run the OpenStack CLI and inspect the result:
+
+        ```bash
+        openstack user show <user> -f json
+        ```
+
+        A passing result shows the `options` field with `multi_factor_auth_enabled` set to `true`; a failing result shows it absent or `false`.
+      remediation:
+        - id: console
+          desc: |
+            1. Navigate to **Identity → Users** in Horizon as an administrator.
+            2. Edit each user and enable multi-factor authentication.
+            3. Configure the required authentication rules and confirm the user can still authenticate with the second factor before relying on the change.
+        - id: cli
+          desc: |
+            Enable MFA on the user and define the rule set that the user must satisfy. The rule below requires a password plus a TOTP code:
+
+            ```bash
+            openstack user set <user> \
+              --multi-factor-auth-enabled \
+              --multi-factor-auth-rule password,totp
+            ```
+        - id: terraform
+          desc: |
+            Set `multi_factor_auth_enabled = true` and define `multi_factor_auth_rule` on the `openstack_identity_user_v3` resource:
+
+            ```hcl
+            resource "openstack_identity_user_v3" "operator" {
+              name                     = "operator"
+              default_project_id       = openstack_identity_project_v3.ops.id
+              multi_factor_auth_enabled = true
+
+              multi_factor_auth_rule {
+                rule = ["password", "totp"]
+              }
+            }
+            ```
+    refs:
+      - url: https://docs.openstack.org/keystone/latest/admin/configure-mfa.html
+        title: OpenStack Keystone multi-factor authentication
+
+  - uid: mondoo-openstack-security-user-mfa-enabled-openstack
+    filters: asset.platform == "openstack-project"
+    mql: |
+      openstack.users.all(multiFactorAuthEnabled == true)
+  - uid: mondoo-openstack-security-user-mfa-enabled-terraform-hcl
+    filters: asset.platform == "terraform-hcl" && terraform.resources.contains(nameLabel == "openstack_identity_user_v3")
+    mql: |
+      terraform.resources("openstack_identity_user_v3").all(
+        arguments['multi_factor_auth_enabled'] == true
+      )
+  - uid: mondoo-openstack-security-user-mfa-enabled-terraform-plan
+    filters: asset.platform == "terraform-plan" && terraform.plan.resourceChanges.contains(type == "openstack_identity_user_v3")
+    mql: |
+      terraform.plan.resourceChanges.where(type == "openstack_identity_user_v3").all(
+        change.after.multi_factor_auth_enabled == true
+      )
+  - uid: mondoo-openstack-security-user-mfa-enabled-terraform-state
+    filters: asset.platform == "terraform-state" && terraform.state.resources.contains(type == "openstack_identity_user_v3")
+    mql: |
+      terraform.state.resources.where(type == "openstack_identity_user_v3").all(
+        values.multi_factor_auth_enabled == true
+      )
+
+  - uid: mondoo-openstack-security-user-lockout-not-bypassed
+    title: Ensure Keystone users are not exempt from account lockout
+    impact: 70
+    tags:
+      compliance/bsi-sys-1-5: false
+      compliance/csa-cloud-controls-matrix-4: false
+      compliance/dora: dora-art-9
+      compliance/hipaa: false
+      compliance/iso-27001-2022: iso-27001-2022-a-8-5
+      compliance/nis-2: false
+      compliance/nist-csf-1: false
+      compliance/nist-csf-2: false
+      compliance/nist-sp-800-53-rev5: nist-sp-800-53-rev5-ac-7
+      compliance/nist-sp-800-171: nist-sp-800-171--3-1-8
+      compliance/pci-dss-4: pcidss-requirement-8-3-4
+      compliance/soc2-2017: false
+      compliance/vda-isa-5: false
+    variants:
+      - uid: mondoo-openstack-security-user-lockout-not-bypassed-openstack
+        tags:
+          mondoo.com/filter-title: OpenStack Project
+          mondoo.com/filter-icon: openstack
+      - uid: mondoo-openstack-security-user-lockout-not-bypassed-terraform-hcl
+        tags:
+          mondoo.com/filter-title: Terraform HCL
+          mondoo.com/filter-icon: terraform
+      - uid: mondoo-openstack-security-user-lockout-not-bypassed-terraform-plan
+        tags:
+          mondoo.com/filter-title: Terraform Plan
+          mondoo.com/filter-icon: terraform
+      - uid: mondoo-openstack-security-user-lockout-not-bypassed-terraform-state
+        tags:
+          mondoo.com/filter-title: Terraform State
+          mondoo.com/filter-icon: terraform
+    docs:
+      desc: |
+        This check ensures that no Keystone user has `ignore_lockout_failure_attempts` set to true. When that option is set, the account is exempt from the lockout that normally suspends a user after a configured number of failed authentication attempts, leaving it open to unlimited password guessing.
+
+        **Why this matters**
+
+        - **Brute-force exposure:** An account exempt from lockout can be subjected to unlimited online password-guessing attempts with no automatic throttle.
+        - **Silent weakening:** The exemption is a per-user override that quietly removes a domain-wide protection for that account, which is easy to miss in a review.
+        - **High-value targets:** Operators sometimes set the exemption on automation or admin accounts, which are exactly the accounts an attacker most wants to brute force.
+
+        **Risk mitigation**
+
+        - **Credential guessing:** Keeping lockout in force ensures repeated failed attempts suspend the account rather than continuing indefinitely.
+        - **Consistent policy:** Removing the override re-applies the domain's account-lockout protection uniformly across users.
+      audit: |
+        ### Audit via Horizon
+
+        1. Sign in to the OpenStack Horizon dashboard as an administrator.
+        2. Open **Identity** then **Users**.
+        3. Review each user's options for a lockout-exemption setting.
+
+        A passing result shows no user exempt from lockout; a failing result shows a user with the lockout exemption set.
+
+        ### Audit via CLI
+
+        Run the OpenStack CLI and inspect the result:
+
+        ```bash
+        openstack user show <user> -f json
+        ```
+
+        A passing result shows the `options` field with `ignore_lockout_failure_attempts` absent or `false`; a failing result shows it set to `true`.
+      remediation:
+        - id: console
+          desc: |
+            1. Navigate to **Identity → Users** in Horizon as an administrator.
+            2. Edit each affected user and clear the lockout-exemption option so standard account-lockout applies.
+            3. Confirm the lockout policy is configured at the domain or deployment level so the account is now protected.
+        - id: cli
+          desc: |
+            Clear the exemption so the user is subject to the configured lockout policy:
+
+            ```bash
+            openstack user set <user> --ignore-lockout-failure-attempts False
+            ```
+        - id: terraform
+          desc: |
+            Either omit `ignore_lockout_failure_attempts` on the `openstack_identity_user_v3` resource (the default is `false`) or set it explicitly:
+
+            ```hcl
+            resource "openstack_identity_user_v3" "operator" {
+              name                            = "operator"
+              default_project_id              = openstack_identity_project_v3.ops.id
+              ignore_lockout_failure_attempts = false
+            }
+            ```
+    refs:
+      - url: https://docs.openstack.org/keystone/latest/admin/configuration.html
+        title: OpenStack Keystone security compliance and lockout
+
+  - uid: mondoo-openstack-security-user-lockout-not-bypassed-openstack
+    filters: asset.platform == "openstack-project"
+    mql: |
+      openstack.users.all(ignoreLockoutFailureAttempts == false)
+  - uid: mondoo-openstack-security-user-lockout-not-bypassed-terraform-hcl
+    filters: asset.platform == "terraform-hcl" && terraform.resources.contains(nameLabel == "openstack_identity_user_v3")
+    mql: |
+      terraform.resources("openstack_identity_user_v3").all(
+        arguments['ignore_lockout_failure_attempts'] != true
+      )
+  - uid: mondoo-openstack-security-user-lockout-not-bypassed-terraform-plan
+    filters: asset.platform == "terraform-plan" && terraform.plan.resourceChanges.contains(type == "openstack_identity_user_v3")
+    mql: |
+      terraform.plan.resourceChanges.where(type == "openstack_identity_user_v3").all(
+        change.after.ignore_lockout_failure_attempts != true
+      )
+  - uid: mondoo-openstack-security-user-lockout-not-bypassed-terraform-state
+    filters: asset.platform == "terraform-state" && terraform.state.resources.contains(type == "openstack_identity_user_v3")
+    mql: |
+      terraform.state.resources.where(type == "openstack_identity_user_v3").all(
+        values.ignore_lockout_failure_attempts != true
       )
 
   - uid: mondoo-openstack-security-app-credentials-have-expiry
@@ -386,9 +638,9 @@ queries:
         - id: console
           desc: |
             1. Navigate to **Compute → Instances** in Horizon.
-            2. The keypair cannot be added to an existing server. Snapshot the workload, then launch a replacement with **Key Pair** set to a managed keypair.
-            3. Move any floating IPs and attached volumes to the replacement.
-            4. Delete the original instance; the check keeps failing while the keyless server exists.
+            2. The keypair cannot be added to an existing server. Snapshot the workload, then launch a replacement with **Key Pair** set to a managed keypair. An instance snapshot captures the root disk only, so it may not include data on attached Cinder volumes; those volumes migrate separately in the next step.
+            3. Move any floating IPs and attached volumes to the replacement, then confirm you can log in to the replacement over SSH with the new keypair.
+            4. Delete the original instance only after SSH access to the replacement is verified. Deleting it first risks locking you out if the new keypair was not injected correctly. The check keeps failing while the keyless server exists.
         - id: cli
           desc: |
             ```bash
@@ -396,7 +648,8 @@ queries:
             openstack server create replacement \
               --image ubuntu-24.04 --flavor m1.small --network app-net \
               --key-name ops-key
-            # Move floating IPs and volumes over, confirm access, then remove the keyless server
+            # Move floating IPs and volumes over, then confirm SSH access to the
+            # replacement with the new keypair before deleting the original
             openstack server delete original-server
             ```
         - id: terraform
@@ -512,6 +765,8 @@ queries:
       remediation:
         - id: console
           desc: |
+            Attaching a security group gives the instance an enforceable per-VM firewall instead of leaving its exposure to whatever the network plane defaults to. Pick a group scoped to the instance's role so it only opens the ports that role needs.
+
             1. Navigate to **Compute → Instances** in Horizon.
             2. From the instance's action menu, select **Edit Security Groups**.
             3. Add the security group that matches the instance's role and save.
@@ -565,6 +820,71 @@ queries:
         values.security_groups != null && values.security_groups.length > 0
       )
 
+  # Security-only check (compliance mapping intentionally omitted per maintainer).
+  # No Terraform variants: internetReachable is a runtime-computed exposure signal (IP + security group/firewall reachability) with no static config analog.
+  - uid: mondoo-openstack-security-server-not-internet-reachable
+    title: Ensure compute servers are not reachable from the internet
+    impact: 85
+    filters: asset.platform == "openstack-project"
+    mql: |
+      openstack.servers.all( exposure.internetReachable == false )
+    docs:
+      desc: |
+        This check ensures that no Nova compute server is reachable from the public internet. `internetReachable` combines a public edge (a floating IP or a port on an external network) with a security-group rule that actually permits inbound traffic from a public source, so it reports a server as exposed only when both conditions hold — a higher-fidelity "actually exposed" signal than a public-IP flag alone.
+
+        **Why this matters**
+
+        - **Reduced attack surface:** A server with no internet-reachable path keeps its listening services off the public scanning grid entirely.
+        - **Defense in depth:** Combining a public IP with a permissive security-group rule is what turns a reachable address into an exploitable one; removing either side closes the path.
+        - **Fewer false alarms:** Because the signal correlates the IP and the security-group rules, it surfaces servers that are genuinely exposed rather than every server that merely holds a floating IP.
+
+        **Risk mitigation**
+
+        - **Internet-wide exploitation:** Prevents listening services from being probed and attacked by arbitrary internet hosts.
+        - **Lateral movement entry:** Removes a public foothold an attacker could use to reach the rest of the project network.
+
+        Intentionally public hosts such as bastions and public web servers will fail this check and should be exempted.
+      audit: |
+        ### Audit via Horizon
+
+        1. Sign in to the OpenStack Horizon dashboard as a project member.
+        2. Open **Compute** then **Instances** and review each instance's **IP Address** and floating IP assignment.
+        3. Open **Network** then **Security Groups** and review the ingress rules of the groups attached to each reachable instance.
+
+        A passing result shows that any instance with a floating IP or an external-network port has no security-group ingress rule permitting traffic from `0.0.0.0/0` or `::/0`; a failing result shows an instance that has both a public edge and a permissive ingress rule.
+
+        ### Audit via CLI
+
+        Run the OpenStack CLI and inspect the result:
+
+        ```bash
+        openstack server list --long
+        openstack security group rule list <group>
+        ```
+
+        A passing result shows no server that combines a floating IP (or external-network port) with an ingress rule open to `0.0.0.0/0` or `::/0`; a failing result shows a server that has both.
+      remediation:
+        - id: console
+          desc: |
+            Close the internet-reachable path by tightening the security group or removing the public edge. Keep management access while you do it.
+
+            1. Navigate to **Network → Security Groups** in Horizon and open the group attached to the affected instance.
+            2. Replace any ingress rule sourced from `0.0.0.0/0` or `::/0` with a rule scoped to a specific trusted CIDR, then confirm legitimate clients still reach the service.
+            3. If the server does not need a public edge at all, navigate to **Compute → Instances**, open the instance, and disassociate its floating IP under the action menu.
+        - id: cli
+          desc: |
+            ```bash
+            # Scope the world-open ingress rule to a trusted CIDR
+            openstack security group rule create app-sg \
+              --ingress --protocol tcp --dst-port 443 --remote-ip 203.0.113.0/24
+            openstack security group rule delete 4a4ee176-43e6-4b48-8bcf-5acd1c403fbf
+            # Or, if the server needs no public edge, remove its floating IP
+            openstack server remove floating ip web-01 203.0.113.50
+            ```
+    refs:
+      - url: https://docs.openstack.org/security-guide/networking.html
+        title: OpenStack Neutron security groups
+
   - uid: mondoo-openstack-security-no-unrestricted-ssh
     title: Ensure no security group allows unrestricted inbound SSH (port 22)
     impact: 100
@@ -586,6 +906,10 @@ queries:
       - uid: mondoo-openstack-security-no-unrestricted-ssh-openstack
         tags:
           mondoo.com/filter-title: OpenStack Project
+          mondoo.com/filter-icon: openstack
+      - uid: mondoo-openstack-security-no-unrestricted-ssh-openstack-security-group
+        tags:
+          mondoo.com/filter-title: OpenStack Security Group
           mondoo.com/filter-icon: openstack
       - uid: mondoo-openstack-security-no-unrestricted-ssh-terraform-hcl
         tags:
@@ -673,6 +997,12 @@ queries:
           portRangeMin <= 22 && portRangeMax >= 22
         )
       )
+  - uid: mondoo-openstack-security-no-unrestricted-ssh-openstack-security-group
+    filters: asset.platform == "openstack-security-group"
+    mql: |
+      openstack.securityGroup.rules.where(direction == "ingress").where(remoteIpPrefix == "0.0.0.0/0" || remoteIpPrefix == "::/0").where(protocol == "tcp" || protocol == "").none(
+        portRangeMin <= 22 && portRangeMax >= 22
+      )
   - uid: mondoo-openstack-security-no-unrestricted-ssh-terraform-hcl
     filters: asset.platform == "terraform-hcl" && terraform.resources.contains(nameLabel == "openstack_networking_secgroup_rule_v2")
     mql: |
@@ -690,6 +1020,128 @@ queries:
     mql: |
       terraform.state.resources.where(type == "openstack_networking_secgroup_rule_v2").where(values.direction == "ingress").where(values.remote_ip_prefix == "0.0.0.0/0" || values.remote_ip_prefix == "::/0").where(values.protocol == "tcp" || values.protocol == "").none(
         values.port_range_min <= 22 && values.port_range_max >= 22
+      )
+
+  - uid: mondoo-openstack-security-firewall-policy-audited
+    title: Ensure FWaaS firewall policies have been audited
+    impact: 40
+    tags:
+      compliance/bsi-sys-1-5: false
+      compliance/csa-cloud-controls-matrix-4: false
+      compliance/dora: dora-art-9
+      compliance/hipaa: false
+      compliance/iso-27001-2022: iso-27001-2022-a-8-9
+      compliance/nis-2: false
+      compliance/nist-csf-1: nist-csf-1-pr-ip-1
+      compliance/nist-csf-2: nist-csf-2-pr-ps-01
+      compliance/nist-sp-800-53-rev5: nist-sp-800-53-rev5-cm-6
+      compliance/nist-sp-800-171: nist-sp-800-171--3-4-1
+      compliance/pci-dss-4: pcidss-requirement-1-2-7
+      compliance/soc2-2017: false
+      compliance/vda-isa-5: vda-isa-5-5-2-7
+    variants:
+      - uid: mondoo-openstack-security-firewall-policy-audited-openstack
+        tags:
+          mondoo.com/filter-title: OpenStack Project
+          mondoo.com/filter-icon: openstack
+      - uid: mondoo-openstack-security-firewall-policy-audited-terraform-hcl
+        tags:
+          mondoo.com/filter-title: Terraform HCL
+          mondoo.com/filter-icon: terraform
+      - uid: mondoo-openstack-security-firewall-policy-audited-terraform-plan
+        tags:
+          mondoo.com/filter-title: Terraform Plan
+          mondoo.com/filter-icon: terraform
+      - uid: mondoo-openstack-security-firewall-policy-audited-terraform-state
+        tags:
+          mondoo.com/filter-title: Terraform State
+          mondoo.com/filter-icon: terraform
+    docs:
+      desc: |
+        This check ensures that every Neutron FWaaS v2 firewall policy has `audited` set to true, marking that an administrator has reviewed the policy's ordered rule set. Neutron resets the audited flag to false whenever the policy or any of its rules change, so a policy that reports audited has been reviewed since its last modification.
+
+        **Why this matters**
+
+        - **Rules drift:** Firewall rule sets accumulate edits over time, and an unreviewed policy may permit access that no one has confirmed is still required.
+        - **Explicit sign-off:** The audited flag records a deliberate review rather than relying on the assumption that the rules are still correct.
+        - **Change detection:** Because the flag clears on any change, an unaudited policy is a signal that rules were modified without a follow-up review.
+
+        **Risk mitigation**
+
+        - **Stale permissive rules:** Requiring review before a policy is marked audited catches rules that have outlived their purpose.
+        - **Unverified changes:** The reset-on-change behavior surfaces edits that have not been reviewed, prompting a fresh look before the policy is trusted.
+      audit: |
+        ### Audit via Horizon
+
+        1. Sign in to the OpenStack Horizon dashboard as a project member.
+        2. Open **Network** then **Firewalls** and review the firewall policies.
+        3. Check whether each policy shows as audited.
+
+        A passing result shows every firewall policy marked audited; a failing result shows a policy that has not been audited since its last change.
+
+        ### Audit via CLI
+
+        Run the OpenStack CLI and inspect the result:
+
+        ```bash
+        openstack firewall group policy list
+        openstack firewall group policy show <policy>
+        ```
+
+        A passing result shows `audited` set to `True` for every policy; a failing result shows `audited` set to `False`.
+      remediation:
+        - id: console
+          desc: |
+            1. Open **Network → Firewalls** in Horizon and select each firewall policy.
+            2. Review the ordered rule set and confirm every rule is still required and correctly scoped.
+            3. Mark the policy audited once the review is complete. Any later change to the policy or its rules clears the flag and requires a fresh review.
+        - id: cli
+          desc: |
+            After reviewing the policy's rules, mark it audited:
+
+            ```bash
+            openstack firewall group policy set --audited <policy>
+            ```
+
+            Re-run the review and set the flag again after any later change, since Neutron clears it on modification.
+        - id: terraform
+          desc: |
+            Set `audited = true` on the `openstack_fw_policy_v2` resource after the rule list has been reviewed:
+
+            ```hcl
+            resource "openstack_fw_policy_v2" "perimeter" {
+              name    = "perimeter"
+              audited = true
+              rules = [
+                openstack_fw_rule_v2.allow_https.id,
+              ]
+            }
+            ```
+    refs:
+      - url: https://docs.openstack.org/neutron/latest/admin/fwaas-v2-scenario.html
+        title: OpenStack Neutron FWaaS v2
+
+  - uid: mondoo-openstack-security-firewall-policy-audited-openstack
+    filters: asset.platform == "openstack-project"
+    mql: |
+      openstack.firewallPolicies.all(audited == true)
+  - uid: mondoo-openstack-security-firewall-policy-audited-terraform-hcl
+    filters: asset.platform == "terraform-hcl" && terraform.resources.contains(nameLabel == "openstack_fw_policy_v2")
+    mql: |
+      terraform.resources("openstack_fw_policy_v2").all(
+        arguments['audited'] == true
+      )
+  - uid: mondoo-openstack-security-firewall-policy-audited-terraform-plan
+    filters: asset.platform == "terraform-plan" && terraform.plan.resourceChanges.contains(type == "openstack_fw_policy_v2")
+    mql: |
+      terraform.plan.resourceChanges.where(type == "openstack_fw_policy_v2").all(
+        change.after.audited == true
+      )
+  - uid: mondoo-openstack-security-firewall-policy-audited-terraform-state
+    filters: asset.platform == "terraform-state" && terraform.state.resources.contains(type == "openstack_fw_policy_v2")
+    mql: |
+      terraform.state.resources.where(type == "openstack_fw_policy_v2").all(
+        values.audited == true
       )
 
   - uid: mondoo-openstack-security-no-unrestricted-rdp
@@ -713,6 +1165,10 @@ queries:
       - uid: mondoo-openstack-security-no-unrestricted-rdp-openstack
         tags:
           mondoo.com/filter-title: OpenStack Project
+          mondoo.com/filter-icon: openstack
+      - uid: mondoo-openstack-security-no-unrestricted-rdp-openstack-security-group
+        tags:
+          mondoo.com/filter-title: OpenStack Security Group
           mondoo.com/filter-icon: openstack
       - uid: mondoo-openstack-security-no-unrestricted-rdp-terraform-hcl
         tags:
@@ -800,6 +1256,12 @@ queries:
           portRangeMin <= 3389 && portRangeMax >= 3389
         )
       )
+  - uid: mondoo-openstack-security-no-unrestricted-rdp-openstack-security-group
+    filters: asset.platform == "openstack-security-group"
+    mql: |
+      openstack.securityGroup.rules.where(direction == "ingress").where(remoteIpPrefix == "0.0.0.0/0" || remoteIpPrefix == "::/0").where(protocol == "tcp" || protocol == "").none(
+        portRangeMin <= 3389 && portRangeMax >= 3389
+      )
   - uid: mondoo-openstack-security-no-unrestricted-rdp-terraform-hcl
     filters: asset.platform == "terraform-hcl" && terraform.resources.contains(nameLabel == "openstack_networking_secgroup_rule_v2")
     mql: |
@@ -817,6 +1279,148 @@ queries:
     mql: |
       terraform.state.resources.where(type == "openstack_networking_secgroup_rule_v2").where(values.direction == "ingress").where(values.remote_ip_prefix == "0.0.0.0/0" || values.remote_ip_prefix == "::/0").where(values.protocol == "tcp" || values.protocol == "").none(
         values.port_range_min <= 3389 && values.port_range_max >= 3389
+      )
+
+  - uid: mondoo-openstack-security-no-unrestricted-winrm
+    title: Ensure no security group allows unrestricted inbound WinRM (5985, 5986)
+    impact: 100
+    tags:
+      compliance/bsi-sys-1-5: false
+      compliance/csa-cloud-controls-matrix-4: cloud-controls-matrix-4-ivs-03
+      compliance/dora: dora-art-9
+      compliance/hipaa: hipaa-security-ss164-312-e-1-transmission
+      compliance/iso-27001-2022: iso-27001-2022-a-8-20
+      compliance/nis-2: nis-2-21-2-i
+      compliance/nist-csf-1: nist-csf-1-pr-ac-5
+      compliance/nist-csf-2: nist-csf-2-pr-ir-01
+      compliance/nist-sp-800-53-rev5: nist-sp-800-53-rev5-sc-7
+      compliance/nist-sp-800-171: nist-sp-800-171--3-13-1
+      compliance/pci-dss-4: pcidss-requirement-1-3-1
+      compliance/soc2-2017: soc2-control-cc6-6-1
+      compliance/vda-isa-5: vda-isa-5-5-2-7
+    variants:
+      - uid: mondoo-openstack-security-no-unrestricted-winrm-openstack
+        tags:
+          mondoo.com/filter-title: OpenStack Project
+          mondoo.com/filter-icon: openstack
+      - uid: mondoo-openstack-security-no-unrestricted-winrm-openstack-security-group
+        tags:
+          mondoo.com/filter-title: OpenStack Security Group
+          mondoo.com/filter-icon: openstack
+      - uid: mondoo-openstack-security-no-unrestricted-winrm-terraform-hcl
+        tags:
+          mondoo.com/filter-title: Terraform HCL
+          mondoo.com/filter-icon: terraform
+      - uid: mondoo-openstack-security-no-unrestricted-winrm-terraform-plan
+        tags:
+          mondoo.com/filter-title: Terraform Plan
+          mondoo.com/filter-icon: terraform
+      - uid: mondoo-openstack-security-no-unrestricted-winrm-terraform-state
+        tags:
+          mondoo.com/filter-title: Terraform State
+          mondoo.com/filter-icon: terraform
+    docs:
+      desc: |
+        This check ensures that no Neutron security group has an ingress rule that allows TCP traffic on the Windows Remote Management ports 5985 (HTTP) or 5986 (HTTPS) from the public internet at `0.0.0.0/0` or `::/0`. WinRM drives PowerShell Remoting and remote administration on Windows hosts, so an internet-exposed listener is a direct path to remote command execution.
+
+        **Why this matters**
+
+        - **Remote command execution:** WinRM is a management channel that runs commands on the host; an open listener exposes that channel to the entire internet.
+        - **Credential attacks:** Mass-scanning campaigns spray known credentials and NTLM relay attempts against any reachable WinRM endpoint.
+        - **Reduced attack surface:** Keeping WinRM off the open internet removes it from automated exploitation entirely.
+
+        **Risk mitigation**
+
+        - **Lateral movement:** Confines WinRM access to trusted CIDRs, a bastion host, or a VPN so administration comes only from known sources.
+        - **Host takeover:** Removes a remote-management vector that leads directly to full control of the Windows instance.
+      audit: |
+        ### Audit via Horizon
+
+        1. Sign in to the OpenStack Horizon dashboard as a project member.
+        2. Open **Network** then **Security Groups**.
+        3. For each security group, open **Manage Rules** and review the ingress rules.
+
+        A passing result shows no ingress rule allowing TCP port 5985 or 5986 from `0.0.0.0/0` or `::/0`; a failing result shows such a rule.
+
+        ### Audit via CLI
+
+        Run the OpenStack CLI and inspect the result:
+
+        ```bash
+        openstack security group rule list <group>
+        ```
+
+        A passing result shows no ingress TCP rule covering port 5985 or 5986 with a remote IP prefix of `0.0.0.0/0` or `::/0`; a failing result shows one.
+      remediation:
+        - id: console
+          desc: |
+            1. Navigate to **Network → Security Groups** in Horizon and open the affected security group.
+            2. Add a new ingress rule covering TCP ports 5985 and 5986 with **CIDR** set to a specific trusted range.
+            3. Confirm WinRM still works from the trusted range, then delete the rule open to `0.0.0.0/0` or `::/0`. Removing the open rule drops live WinRM sessions that arrived through it.
+        - id: cli
+          desc: |
+            ```bash
+            # Add the scoped rule first so management access survives the change
+            openstack security group rule create windows-sg \
+              --ingress --protocol tcp --dst-port 5985:5986 --remote-ip 203.0.113.0/24
+            # Then remove the world-open rule; live sessions through it are dropped
+            openstack security group rule delete 4a4ee176-43e6-4b48-8bcf-5acd1c403fbf
+            ```
+        - id: terraform
+          desc: |
+            Scope inbound WinRM `remote_ip_prefix` to a specific trusted CIDR, never `0.0.0.0/0` or `::/0`:
+
+            ```hcl
+            resource "openstack_networking_secgroup_rule_v2" "winrm" {
+              direction         = "ingress"
+              ethertype         = "IPv4"
+              protocol          = "tcp"
+              port_range_min    = 5985
+              port_range_max    = 5986
+              remote_ip_prefix  = "203.0.113.0/24"
+              security_group_id = openstack_networking_secgroup_v2.windows.id
+            }
+            ```
+    refs:
+      - url: https://docs.openstack.org/security-guide/networking.html
+        title: OpenStack Neutron security groups
+
+  - uid: mondoo-openstack-security-no-unrestricted-winrm-openstack
+    filters: asset.platform == "openstack-project"
+    mql: |
+      openstack.securityGroups.all(
+        rules.where(direction == "ingress").where(remoteIpPrefix == "0.0.0.0/0" || remoteIpPrefix == "::/0").where(protocol == "tcp" || protocol == "").none(
+          portRangeMin <= 5985 && portRangeMax >= 5985 ||
+          portRangeMin <= 5986 && portRangeMax >= 5986
+        )
+      )
+  - uid: mondoo-openstack-security-no-unrestricted-winrm-openstack-security-group
+    filters: asset.platform == "openstack-security-group"
+    mql: |
+      openstack.securityGroup.rules.where(direction == "ingress").where(remoteIpPrefix == "0.0.0.0/0" || remoteIpPrefix == "::/0").where(protocol == "tcp" || protocol == "").none(
+        portRangeMin <= 5985 && portRangeMax >= 5985 ||
+        portRangeMin <= 5986 && portRangeMax >= 5986
+      )
+  - uid: mondoo-openstack-security-no-unrestricted-winrm-terraform-hcl
+    filters: asset.platform == "terraform-hcl" && terraform.resources.contains(nameLabel == "openstack_networking_secgroup_rule_v2")
+    mql: |
+      terraform.resources("openstack_networking_secgroup_rule_v2").where(arguments['direction'] == "ingress").where(arguments['remote_ip_prefix'] == "0.0.0.0/0" || arguments['remote_ip_prefix'] == "::/0").where(arguments['protocol'] == "tcp" || arguments['protocol'] == "").none(
+        arguments['port_range_min'] <= 5985 && arguments['port_range_max'] >= 5985 ||
+        arguments['port_range_min'] <= 5986 && arguments['port_range_max'] >= 5986
+      )
+  - uid: mondoo-openstack-security-no-unrestricted-winrm-terraform-plan
+    filters: asset.platform == "terraform-plan" && terraform.plan.resourceChanges.contains(type == "openstack_networking_secgroup_rule_v2")
+    mql: |
+      terraform.plan.resourceChanges.where(type == "openstack_networking_secgroup_rule_v2").where(change.after.direction == "ingress").where(change.after.remote_ip_prefix == "0.0.0.0/0" || change.after.remote_ip_prefix == "::/0").where(change.after.protocol == "tcp" || change.after.protocol == "").none(
+        change.after.port_range_min <= 5985 && change.after.port_range_max >= 5985 ||
+        change.after.port_range_min <= 5986 && change.after.port_range_max >= 5986
+      )
+  - uid: mondoo-openstack-security-no-unrestricted-winrm-terraform-state
+    filters: asset.platform == "terraform-state" && terraform.state.resources.contains(type == "openstack_networking_secgroup_rule_v2")
+    mql: |
+      terraform.state.resources.where(type == "openstack_networking_secgroup_rule_v2").where(values.direction == "ingress").where(values.remote_ip_prefix == "0.0.0.0/0" || values.remote_ip_prefix == "::/0").where(values.protocol == "tcp" || values.protocol == "").none(
+        values.port_range_min <= 5985 && values.port_range_max >= 5985 ||
+        values.port_range_min <= 5986 && values.port_range_max >= 5986
       )
 
   - uid: mondoo-openstack-security-no-unrestricted-db-ports
@@ -840,6 +1444,10 @@ queries:
       - uid: mondoo-openstack-security-no-unrestricted-db-ports-openstack
         tags:
           mondoo.com/filter-title: OpenStack Project
+          mondoo.com/filter-icon: openstack
+      - uid: mondoo-openstack-security-no-unrestricted-db-ports-openstack-security-group
+        tags:
+          mondoo.com/filter-title: OpenStack Security Group
           mondoo.com/filter-icon: openstack
       - uid: mondoo-openstack-security-no-unrestricted-db-ports-terraform-hcl
         tags:
@@ -934,6 +1542,19 @@ queries:
           portRangeMin <= 1521 && portRangeMax >= 1521
         )
       )
+  - uid: mondoo-openstack-security-no-unrestricted-db-ports-openstack-security-group
+    filters: asset.platform == "openstack-security-group"
+    mql: |
+      openstack.securityGroup.rules.where(direction == "ingress").where(remoteIpPrefix == "0.0.0.0/0" || remoteIpPrefix == "::/0").where(protocol == "tcp" || protocol == "").none(
+        portRangeMin <= 3306 && portRangeMax >= 3306 ||
+        portRangeMin <= 5432 && portRangeMax >= 5432 ||
+        portRangeMin <= 27017 && portRangeMax >= 27017 ||
+        portRangeMin <= 6379 && portRangeMax >= 6379 ||
+        portRangeMin <= 11211 && portRangeMax >= 11211 ||
+        portRangeMin <= 9200 && portRangeMax >= 9200 ||
+        portRangeMin <= 1433 && portRangeMax >= 1433 ||
+        portRangeMin <= 1521 && portRangeMax >= 1521
+      )
   - uid: mondoo-openstack-security-no-unrestricted-db-ports-terraform-hcl
     filters: asset.platform == "terraform-hcl" && terraform.resources.contains(nameLabel == "openstack_networking_secgroup_rule_v2")
     mql: |
@@ -974,6 +1595,170 @@ queries:
         values.port_range_min <= 1521 && values.port_range_max >= 1521
       )
 
+  - uid: mondoo-openstack-security-no-unrestricted-mgmt-ports
+    title: Ensure no security group allows unrestricted inbound orchestration ports
+    impact: 95
+    tags:
+      compliance/bsi-sys-1-5: false
+      compliance/csa-cloud-controls-matrix-4: cloud-controls-matrix-4-ivs-03
+      compliance/dora: dora-art-9
+      compliance/hipaa: hipaa-security-ss164-312-e-1-transmission
+      compliance/iso-27001-2022: iso-27001-2022-a-8-20
+      compliance/nis-2: nis-2-21-2-i
+      compliance/nist-csf-1: nist-csf-1-pr-ac-5
+      compliance/nist-csf-2: nist-csf-2-pr-ir-01
+      compliance/nist-sp-800-53-rev5: nist-sp-800-53-rev5-sc-7
+      compliance/nist-sp-800-171: nist-sp-800-171--3-13-1
+      compliance/pci-dss-4: pcidss-requirement-1-3-1
+      compliance/soc2-2017: soc2-control-cc6-6-1
+      compliance/vda-isa-5: vda-isa-5-5-2-7
+    variants:
+      - uid: mondoo-openstack-security-no-unrestricted-mgmt-ports-openstack
+        tags:
+          mondoo.com/filter-title: OpenStack Project
+          mondoo.com/filter-icon: openstack
+      - uid: mondoo-openstack-security-no-unrestricted-mgmt-ports-openstack-security-group
+        tags:
+          mondoo.com/filter-title: OpenStack Security Group
+          mondoo.com/filter-icon: openstack
+      - uid: mondoo-openstack-security-no-unrestricted-mgmt-ports-terraform-hcl
+        tags:
+          mondoo.com/filter-title: Terraform HCL
+          mondoo.com/filter-icon: terraform
+      - uid: mondoo-openstack-security-no-unrestricted-mgmt-ports-terraform-plan
+        tags:
+          mondoo.com/filter-title: Terraform Plan
+          mondoo.com/filter-icon: terraform
+      - uid: mondoo-openstack-security-no-unrestricted-mgmt-ports-terraform-state
+        tags:
+          mondoo.com/filter-title: Terraform State
+          mondoo.com/filter-icon: terraform
+    docs:
+      desc: |
+        This check ensures that no Neutron security group has an ingress rule that allows traffic from the public internet at `0.0.0.0/0` or `::/0` to container and cluster orchestration control planes, covering the Kubernetes API server on 6443, the kubelet API on 10250, etcd on 2379 and 2380, and the Docker daemon on 2375 and 2376. These endpoints expose cluster control and container runtimes that assume a private management network.
+
+        **Why this matters**
+
+        - **Cluster takeover:** The Kubernetes API server and kubelet API accept administrative and workload-execution requests; reaching them from the internet invites full cluster compromise.
+        - **Unauthenticated by default:** The plaintext Docker daemon on 2375 and etcd peer traffic on 2380 ship without authentication, so an open port is direct access to the runtime and its data.
+        - **Designed for private networks:** Orchestration control planes expect to sit behind a private network or VPN, not on the open internet.
+
+        **Risk mitigation**
+
+        - **Secrets exposure:** Keeps etcd — which stores Kubernetes secrets and cluster state — off the internet where it could be read or tampered with.
+        - **Container escape pivot:** Removes runtime endpoints from internet-wide scanning that probes for exposed Docker and Kubernetes APIs to deploy malicious workloads.
+      audit: |
+        ### Audit via Horizon
+
+        1. Sign in to the OpenStack Horizon dashboard as a project member.
+        2. Open **Network** then **Security Groups**.
+        3. For each security group, open **Manage Rules** and review the ingress rules.
+
+        A passing result shows no ingress rule allowing an orchestration port such as 6443, 10250, 2379, 2380, 2375, or 2376 from `0.0.0.0/0` or `::/0`; a failing result shows such a rule.
+
+        ### Audit via CLI
+
+        Run the OpenStack CLI and inspect the result:
+
+        ```bash
+        openstack security group rule list <group>
+        ```
+
+        A passing result shows no ingress rule covering an orchestration control-plane port with a remote IP prefix of `0.0.0.0/0` or `::/0`; a failing result shows one.
+      remediation:
+        - id: console
+          desc: |
+            1. Navigate to **Network → Security Groups** in Horizon and open the affected security group.
+            2. Add a replacement ingress rule for the orchestration port with **CIDR** scoped to a specific trusted range, or a **Remote Security Group** rule that allows only the cluster's own security group.
+            3. Confirm cluster nodes and operators can still reach the control plane, then delete the rule open to `0.0.0.0/0` or `::/0`. Removing the open rule drops connections established through it.
+        - id: cli
+          desc: |
+            ```bash
+            # Add the scoped rule first so the cluster keeps control-plane access
+            openstack security group rule create k8s-sg \
+              --ingress --protocol tcp --dst-port 6443 --remote-ip 203.0.113.0/24
+            # Then remove the world-open rule; connections established through it are dropped
+            openstack security group rule delete 4a4ee176-43e6-4b48-8bcf-5acd1c403fbf
+            ```
+        - id: terraform
+          desc: |
+            Constrain orchestration ingress with `remote_group_id` or a private `remote_ip_prefix`, never `0.0.0.0/0` or `::/0`:
+
+            ```hcl
+            resource "openstack_networking_secgroup_rule_v2" "k8s_api" {
+              direction         = "ingress"
+              ethertype         = "IPv4"
+              protocol          = "tcp"
+              port_range_min    = 6443
+              port_range_max    = 6443
+              remote_ip_prefix  = "203.0.113.0/24"
+              security_group_id = openstack_networking_secgroup_v2.k8s.id
+            }
+            ```
+    refs:
+      - url: https://docs.openstack.org/security-guide/networking.html
+        title: OpenStack Neutron security groups
+      - url: https://kubernetes.io/docs/reference/networking/ports-and-protocols/
+        title: Kubernetes ports and protocols
+
+  - uid: mondoo-openstack-security-no-unrestricted-mgmt-ports-openstack
+    filters: asset.platform == "openstack-project"
+    mql: |
+      openstack.securityGroups.all(
+        rules.where(direction == "ingress").where(remoteIpPrefix == "0.0.0.0/0" || remoteIpPrefix == "::/0").where(protocol == "tcp" || protocol == "").none(
+          portRangeMin <= 6443 && portRangeMax >= 6443 ||
+          portRangeMin <= 10250 && portRangeMax >= 10250 ||
+          portRangeMin <= 2379 && portRangeMax >= 2379 ||
+          portRangeMin <= 2380 && portRangeMax >= 2380 ||
+          portRangeMin <= 2375 && portRangeMax >= 2375 ||
+          portRangeMin <= 2376 && portRangeMax >= 2376
+        )
+      )
+  - uid: mondoo-openstack-security-no-unrestricted-mgmt-ports-openstack-security-group
+    filters: asset.platform == "openstack-security-group"
+    mql: |
+      openstack.securityGroup.rules.where(direction == "ingress").where(remoteIpPrefix == "0.0.0.0/0" || remoteIpPrefix == "::/0").where(protocol == "tcp" || protocol == "").none(
+        portRangeMin <= 6443 && portRangeMax >= 6443 ||
+        portRangeMin <= 10250 && portRangeMax >= 10250 ||
+        portRangeMin <= 2379 && portRangeMax >= 2379 ||
+        portRangeMin <= 2380 && portRangeMax >= 2380 ||
+        portRangeMin <= 2375 && portRangeMax >= 2375 ||
+        portRangeMin <= 2376 && portRangeMax >= 2376
+      )
+  - uid: mondoo-openstack-security-no-unrestricted-mgmt-ports-terraform-hcl
+    filters: asset.platform == "terraform-hcl" && terraform.resources.contains(nameLabel == "openstack_networking_secgroup_rule_v2")
+    mql: |
+      terraform.resources("openstack_networking_secgroup_rule_v2").where(arguments['direction'] == "ingress").where(arguments['remote_ip_prefix'] == "0.0.0.0/0" || arguments['remote_ip_prefix'] == "::/0").where(arguments['protocol'] == "tcp" || arguments['protocol'] == "").none(
+        arguments['port_range_min'] <= 6443 && arguments['port_range_max'] >= 6443 ||
+        arguments['port_range_min'] <= 10250 && arguments['port_range_max'] >= 10250 ||
+        arguments['port_range_min'] <= 2379 && arguments['port_range_max'] >= 2379 ||
+        arguments['port_range_min'] <= 2380 && arguments['port_range_max'] >= 2380 ||
+        arguments['port_range_min'] <= 2375 && arguments['port_range_max'] >= 2375 ||
+        arguments['port_range_min'] <= 2376 && arguments['port_range_max'] >= 2376
+      )
+  - uid: mondoo-openstack-security-no-unrestricted-mgmt-ports-terraform-plan
+    filters: asset.platform == "terraform-plan" && terraform.plan.resourceChanges.contains(type == "openstack_networking_secgroup_rule_v2")
+    mql: |
+      terraform.plan.resourceChanges.where(type == "openstack_networking_secgroup_rule_v2").where(change.after.direction == "ingress").where(change.after.remote_ip_prefix == "0.0.0.0/0" || change.after.remote_ip_prefix == "::/0").where(change.after.protocol == "tcp" || change.after.protocol == "").none(
+        change.after.port_range_min <= 6443 && change.after.port_range_max >= 6443 ||
+        change.after.port_range_min <= 10250 && change.after.port_range_max >= 10250 ||
+        change.after.port_range_min <= 2379 && change.after.port_range_max >= 2379 ||
+        change.after.port_range_min <= 2380 && change.after.port_range_max >= 2380 ||
+        change.after.port_range_min <= 2375 && change.after.port_range_max >= 2375 ||
+        change.after.port_range_min <= 2376 && change.after.port_range_max >= 2376
+      )
+  - uid: mondoo-openstack-security-no-unrestricted-mgmt-ports-terraform-state
+    filters: asset.platform == "terraform-state" && terraform.state.resources.contains(type == "openstack_networking_secgroup_rule_v2")
+    mql: |
+      terraform.state.resources.where(type == "openstack_networking_secgroup_rule_v2").where(values.direction == "ingress").where(values.remote_ip_prefix == "0.0.0.0/0" || values.remote_ip_prefix == "::/0").where(values.protocol == "tcp" || values.protocol == "").none(
+        values.port_range_min <= 6443 && values.port_range_max >= 6443 ||
+        values.port_range_min <= 10250 && values.port_range_max >= 10250 ||
+        values.port_range_min <= 2379 && values.port_range_max >= 2379 ||
+        values.port_range_min <= 2380 && values.port_range_max >= 2380 ||
+        values.port_range_min <= 2375 && values.port_range_max >= 2375 ||
+        values.port_range_min <= 2376 && values.port_range_max >= 2376
+      )
+
   - uid: mondoo-openstack-security-no-all-ports-open
     title: Ensure no security group allows unrestricted inbound traffic to all ports
     impact: 100
@@ -995,6 +1780,10 @@ queries:
       - uid: mondoo-openstack-security-no-all-ports-open-openstack
         tags:
           mondoo.com/filter-title: OpenStack Project
+          mondoo.com/filter-icon: openstack
+      - uid: mondoo-openstack-security-no-all-ports-open-openstack-security-group
+        tags:
+          mondoo.com/filter-title: OpenStack Security Group
           mondoo.com/filter-icon: openstack
       - uid: mondoo-openstack-security-no-all-ports-open-terraform-hcl
         tags:
@@ -1084,6 +1873,13 @@ queries:
           portRangeMin == 0 && portRangeMax == 0 ||
           portRangeMin <= 1 && portRangeMax >= 65535
         )
+      )
+  - uid: mondoo-openstack-security-no-all-ports-open-openstack-security-group
+    filters: asset.platform == "openstack-security-group"
+    mql: |
+      openstack.securityGroup.rules.where(direction == "ingress").where(remoteIpPrefix == "0.0.0.0/0" || remoteIpPrefix == "::/0").none(
+        portRangeMin == 0 && portRangeMax == 0 ||
+        portRangeMin <= 1 && portRangeMax >= 65535
       )
   - uid: mondoo-openstack-security-no-all-ports-open-terraform-hcl
     filters: asset.platform == "terraform-hcl" && terraform.resources.contains(nameLabel == "openstack_networking_secgroup_rule_v2")
@@ -1282,6 +2078,8 @@ queries:
       remediation:
         - id: console
           desc: |
+            Encryption can only be applied by moving the volume onto an encryption-capable volume type, because the type is what binds the volume to a key. The retype copies the data to encrypted storage, so plan for the volume to be offline during the migration.
+
             1. Confirm with your cloud administrator which volume types provide encryption.
             2. Navigate to **Volumes → Volumes** in Horizon and detach the volume from its server if it is attached.
             3. From the volume's action menu, select **Change Volume Type**, choose the encrypted type, and set **Migration Policy** to **On Demand**.
@@ -1298,7 +2096,22 @@ queries:
             openstack server add volume web-01 data-volume
             ```
 
-            If the backend rejects the retype, create a new volume on the encrypted type, attach both volumes, copy the data at the operating system level, and delete the unencrypted original.
+            If the backend rejects the retype, migrate the data manually. Treat this as a data-loss-prone operation and keep the original intact until the copy is verified:
+
+            ```bash
+            # 1. Create a new, empty volume of the same size on the encrypted type
+            openstack volume create --type encrypted-lvm --size 50 data-volume-enc
+
+            # 2. Stop writes to the source so the copy is consistent, then attach both
+            #    volumes to a helper instance
+            openstack server add volume helper-01 data-volume
+            openstack server add volume helper-01 data-volume-enc
+
+            # 3. Copy the data at the operating system level on the helper instance,
+            #    for example `dd` or `rsync` between the two block devices
+            ```
+
+            After the copy completes, mount the encrypted volume and verify the data is complete and readable. Delete the unencrypted original only after this verification succeeds; if anything looks wrong, keep the original and retry the copy.
     refs:
       - url: https://docs.openstack.org/cinder/latest/configuration/block-storage/volume-encryption.html
         title: OpenStack Cinder volume encryption
@@ -1383,6 +2196,8 @@ queries:
             openstack image set --shared <image>
             openstack image add project <image> <member-project>
             ```
+
+            Making the image private stops new downloads but does not recall copies already taken. While it was public, any other tenant could have downloaded or cached it, so rotate any secret material the image carries (embedded credentials, keys, tokens) after restricting visibility.
         - id: terraform
           desc: |
             Either omit `visibility` on `openstack_images_image_v2` (the default is `private`) or set it explicitly to `private` or `shared`:
@@ -1492,19 +2307,43 @@ queries:
       remediation:
         - id: console
           desc: |
-            Horizon does not expose signature upload directly; use the CLI.
+            Horizon does not expose signature upload directly. Use the CLI procedure below, which builds the certificate, signature, and image properties in order.
         - id: cli
           desc: |
+            Image signing has a prerequisite: the signing certificate must live in Barbican so Nova can fetch it at boot to verify the signature. Build the chain in order so the `img_signature_certificate_uuid` you attach to the image actually resolves to the certificate that signed the image data.
+
             ```bash
-            # Sign the image data, upload the certificate to Barbican, then attach
-            # img_signature properties to the image record. See the Glance image
-            # signature verification docs for the full procedure.
+            # 1. Generate a signing key and a self-signed certificate (or use one
+            #    issued by your CA) that will validate the image signature
+            openssl genrsa -out signing.key 3072
+            openssl req -new -x509 -key signing.key -out signing.cert -days 365 \
+              -subj "/CN=image-signing"
+
+            # 2. Store the certificate in Barbican and capture its secret UUID; this
+            #    UUID is what Nova uses to verify the signature at boot time
+            openstack secret store --name image-signing-cert \
+              --algorithm RSA --secret-type certificate \
+              --payload-content-type "application/octet-stream" \
+              --payload-content-encoding base64 \
+              --payload "$(base64 -w0 signing.cert)"
+            # Note the "Secret href" / UUID returned by the command above
+
+            # 3. Sign the image data with the matching private key and base64-encode it
+            openssl dgst -sha256 -sign signing.key \
+              -sigopt rsa_padding_mode:pss -sigopt rsa_pss_saltlen:-1 \
+              -out image.sig golden-app.qcow2
+            base64 -w0 image.sig > image.sig.b64
+
+            # 4. Attach the signature properties to the image record, pointing
+            #    img_signature_certificate_uuid at the Barbican secret from step 2
             openstack image set <image> \
-              --property img_signature="<base64-signature>" \
+              --property img_signature="$(cat image.sig.b64)" \
               --property img_signature_hash_method="SHA-256" \
               --property img_signature_key_type="RSA-PSS" \
               --property img_signature_certificate_uuid="<barbican-cert-uuid>"
             ```
+
+            See the Glance image signature verification docs for the full procedure, including how to enable signature verification in Nova so the attached signature is enforced at boot.
         - id: terraform
           desc: |
             Set the `properties` map on `openstack_images_image_v2` so the signature fields ship with the image record:
@@ -1533,7 +2372,7 @@ queries:
     filters: asset.platform == "openstack-project"
     mql: |
       openstack.images.where(status == "active" && owner.id == openstack.projectId).all(
-        properties["img_signature"] != null
+        imageSignature != ""
       )
   - uid: mondoo-openstack-security-image-signed-terraform-hcl
     filters: asset.platform == "terraform-hcl" && terraform.resources.contains(nameLabel == "openstack_images_image_v2")
@@ -1798,6 +2637,220 @@ queries:
         values.tls_versions != null && values.tls_versions.none(
           _ == "TLSv1.0" || _ == "TLSv1.1" || _ == "SSLv2" || _ == "SSLv3"
         )
+      )
+
+  # No Terraform variants: this check scopes to internet-facing load balancers using the runtime
+  # exposure correlation (a VIP on an external network or with a floating IP plus a listener open
+  # to the world) and then asserts no plaintext listener. The internet-exposure determination is
+  # resolved from live Neutron and Octavia state and has no analog in openstack_lb_loadbalancer_v2
+  # or openstack_lb_listener_v2 HCL; the listener-modern-tls check already covers the
+  # Terraform-expressible TLS posture per listener.
+  - uid: mondoo-openstack-security-listener-no-plaintext-internet
+    title: Ensure internet-facing Octavia load balancers enforce TLS
+    impact: 85
+    filters: asset.platform == "openstack-project"
+    mql: |
+      openstack.loadBalancers.where(exposure.internetReachable == true).all(enforcesTls == true)
+    tags:
+      compliance/bsi-sys-1-5: false
+      compliance/csa-cloud-controls-matrix-4: cloud-controls-matrix-4-cek-04
+      compliance/dora: dora-art-9
+      compliance/hipaa: hipaa-security-ss164-312-e-2-ii-transmission-security-encryption
+      compliance/iso-27001-2022: iso-27001-2022-a-8-24
+      compliance/nis-2: nis-2-21-2-h
+      compliance/nist-csf-1: nist-csf-1-pr-ds-2
+      compliance/nist-csf-2: nist-csf-2-pr-ds-02
+      compliance/nist-sp-800-53-rev5: nist-sp-800-53-rev5-sc-8
+      compliance/nist-sp-800-171: nist-sp-800-171--3-13-8
+      compliance/pci-dss-4: pcidss-requirement-4-2-1
+      compliance/soc2-2017: soc2-control-cc6-7-2
+      compliance/vda-isa-5: vda-isa-5-5-1-2
+    docs:
+      desc: |
+        This check ensures that every internet-facing Octavia load balancer terminates or forwards traffic only over encrypted protocols, with no plaintext listener. A load balancer is treated as internet-facing when its VIP sits on an external network or has a floating IP and at least one listener is open to the world. A plaintext listener such as `HTTP`, `TCP`, `UDP`, `SCTP`, or `PROMETHEUS` on such a load balancer carries client traffic in the clear across the public internet.
+
+        **Why this matters**
+
+        - **Credential and session protection:** A plaintext listener exposes authentication tokens, session cookies, and form data to any host on the network path.
+        - **No transport integrity:** Without TLS, an on-path attacker can read and modify traffic, not just observe it.
+        - **Consistent posture:** Requiring encrypted listeners on every public-facing load balancer removes the gap a single forgotten HTTP listener would leave.
+
+        **Risk mitigation**
+
+        - **Traffic interception:** Encrypting all internet-facing listeners keeps client traffic confidential across untrusted networks.
+        - **Downgrade and injection:** Eliminating plaintext listeners removes the unencrypted path an attacker could steer clients onto.
+
+        A load balancer that is only reachable inside the project network, or one that intentionally redirects HTTP to an HTTPS listener, can be reviewed against its intended design.
+      audit: |
+        ### Audit via Horizon
+
+        1. Sign in to the OpenStack Horizon dashboard as a project member.
+        2. Open **Network** then **Load Balancers**.
+        3. For each load balancer whose VIP is on an external network or has a floating IP, open the **Listeners** tab and review the protocol of every listener.
+
+        A passing internet-facing load balancer has only `HTTPS`, `TERMINATED_HTTPS`, or otherwise encrypted listeners. A failing internet-facing load balancer has a plaintext `HTTP`, `TCP`, `UDP`, `SCTP`, or `PROMETHEUS` listener.
+
+        ### Audit via CLI
+
+        Run the OpenStack CLI and inspect the result:
+
+        ```bash
+        openstack loadbalancer list
+        openstack loadbalancer listener list --loadbalancer <id>
+        ```
+
+        A passing internet-facing load balancer lists only encrypted listener protocols. A failing internet-facing load balancer lists a plaintext protocol.
+      remediation:
+        - id: console
+          desc: |
+            1. Open **Network → Load Balancers** in Horizon and select the internet-facing load balancer.
+            2. On the **Listeners** tab, replace each plaintext listener with a `TERMINATED_HTTPS` listener and an attached TLS certificate, or move the service behind an HTTPS listener.
+            3. Where an HTTP listener must remain for redirects, configure it to redirect to the HTTPS listener rather than serving content.
+        - id: cli
+          desc: |
+            Create an encrypted listener and remove the plaintext one. The TLS material is referenced from a Barbican container:
+
+            ```bash
+            openstack loadbalancer listener create <lb> \
+              --name https --protocol TERMINATED_HTTPS --protocol-port 443 \
+              --default-tls-container-ref <barbican-container-ref>
+            openstack loadbalancer listener delete <plaintext-listener>
+            ```
+        # No Terraform remediation: the internet-facing determination is a runtime correlation of
+        # the VIP's external-network or floating-IP placement with its open listeners and has no
+        # single configuration analog. Use the listener-modern-tls Terraform remediation to define
+        # encrypted listeners.
+    refs:
+      - url: https://docs.openstack.org/octavia/latest/user/guides/basic-cookbook.html
+        title: OpenStack Octavia listener configuration
+
+  - uid: mondoo-openstack-security-listener-restricts-source-cidrs
+    title: Ensure Octavia listeners restrict allowed source CIDRs
+    impact: 60
+    tags:
+      compliance/bsi-sys-1-5: false
+      compliance/csa-cloud-controls-matrix-4: cloud-controls-matrix-4-ivs-03
+      compliance/dora: dora-art-9
+      compliance/hipaa: hipaa-security-ss164-312-e-1-transmission
+      compliance/iso-27001-2022: iso-27001-2022-a-8-20
+      compliance/nis-2: nis-2-21-2-i
+      compliance/nist-csf-1: nist-csf-1-pr-ac-5
+      compliance/nist-csf-2: nist-csf-2-pr-ir-01
+      compliance/nist-sp-800-53-rev5: nist-sp-800-53-rev5-sc-7
+      compliance/nist-sp-800-171: nist-sp-800-171--3-13-1
+      compliance/pci-dss-4: pcidss-requirement-1-3-1
+      compliance/soc2-2017: soc2-control-cc6-6-1
+      compliance/vda-isa-5: vda-isa-5-5-2-7
+    variants:
+      - uid: mondoo-openstack-security-listener-restricts-source-cidrs-openstack
+        tags:
+          mondoo.com/filter-title: OpenStack Project
+          mondoo.com/filter-icon: openstack
+      - uid: mondoo-openstack-security-listener-restricts-source-cidrs-terraform-hcl
+        tags:
+          mondoo.com/filter-title: Terraform HCL
+          mondoo.com/filter-icon: terraform
+      - uid: mondoo-openstack-security-listener-restricts-source-cidrs-terraform-plan
+        tags:
+          mondoo.com/filter-title: Terraform Plan
+          mondoo.com/filter-icon: terraform
+      - uid: mondoo-openstack-security-listener-restricts-source-cidrs-terraform-state
+        tags:
+          mondoo.com/filter-title: Terraform State
+          mondoo.com/filter-icon: terraform
+    docs:
+      desc: |
+        This check ensures that every Octavia listener defines an `allowed_cidrs` allow-list that does not include `0.0.0.0/0` or `::/0`. When `allowed_cidrs` is empty, the listener accepts connections from any source. Defining a restrictive allow-list scopes the listener to the networks that legitimately need it.
+
+        **Why this matters**
+
+        - **Reduced exposure:** Scoping a listener to known client networks keeps it off the public scanning grid and out of reach of arbitrary internet hosts.
+        - **Defense in depth:** A source allow-list at the listener supplements security groups and network ACLs, so a gap in one layer does not fully expose the service.
+        - **Administrative endpoints:** Management and internal listeners are frequently left world-open by default when they should only ever be reached from a bastion or an internal range.
+
+        **Risk mitigation**
+
+        - **Internet-wide scanning:** Restricting source CIDRs removes the listener from mass-scanning campaigns probing every reachable port.
+        - **Targeted abuse:** Limiting which networks can connect narrows who can attempt to exploit the backend the listener fronts.
+
+        Listeners that intentionally serve the public internet can be exempted from this check.
+      audit: |
+        ### Audit via Horizon
+
+        1. Sign in to the OpenStack Horizon dashboard as a project member.
+        2. Open **Network** then **Load Balancers** and select each load balancer.
+        3. On the **Listeners** tab, review the allowed CIDRs configured on every listener.
+
+        A passing listener defines an allowed-CIDR list scoped to specific networks. A failing listener has no allowed CIDRs or includes `0.0.0.0/0` or `::/0`.
+
+        ### Audit via CLI
+
+        Run the OpenStack CLI and inspect the result:
+
+        ```bash
+        openstack loadbalancer listener show <listener> -f json
+        ```
+
+        A passing listener returns an `allowed_cidrs` list that excludes `0.0.0.0/0` and `::/0`. A failing listener returns an empty `allowed_cidrs` or one containing a world-open range.
+      remediation:
+        - id: console
+          desc: |
+            1. Open **Network → Load Balancers** in Horizon and select the load balancer.
+            2. On the **Listeners** tab, edit the listener and set the allowed CIDRs to the specific client networks that need access.
+            3. Confirm legitimate clients fall within the configured ranges before removing broad access.
+        - id: cli
+          desc: |
+            Set the allowed CIDRs on the listener to the networks that need access. Repeat `--allowed-cidr` for each range:
+
+            ```bash
+            openstack loadbalancer listener set <listener> \
+              --allowed-cidr 203.0.113.0/24 \
+              --allowed-cidr 198.51.100.0/24
+            ```
+        - id: terraform
+          desc: |
+            Set `allowed_cidrs` on the `openstack_lb_listener_v2` resource to the trusted client networks, never `0.0.0.0/0` or `::/0`:
+
+            ```hcl
+            resource "openstack_lb_listener_v2" "api" {
+              name            = "api"
+              protocol        = "TERMINATED_HTTPS"
+              protocol_port   = 443
+              loadbalancer_id = openstack_lb_loadbalancer_v2.web.id
+              allowed_cidrs   = ["203.0.113.0/24", "198.51.100.0/24"]
+            }
+            ```
+    refs:
+      - url: https://docs.openstack.org/octavia/latest/user/guides/basic-cookbook.html
+        title: OpenStack Octavia listener access control
+
+  - uid: mondoo-openstack-security-listener-restricts-source-cidrs-openstack
+    filters: asset.platform == "openstack-project"
+    mql: |
+      openstack.listeners.all(openToWorld == false)
+  - uid: mondoo-openstack-security-listener-restricts-source-cidrs-terraform-hcl
+    filters: asset.platform == "terraform-hcl" && terraform.resources.contains(nameLabel == "openstack_lb_listener_v2")
+    mql: |
+      terraform.resources("openstack_lb_listener_v2").all(
+        arguments['allowed_cidrs'] != null &&
+        arguments['allowed_cidrs'].length > 0 &&
+        arguments['allowed_cidrs'].containsNone(["0.0.0.0/0", "::/0"])
+      )
+  - uid: mondoo-openstack-security-listener-restricts-source-cidrs-terraform-plan
+    filters: asset.platform == "terraform-plan" && terraform.plan.resourceChanges.contains(type == "openstack_lb_listener_v2")
+    mql: |
+      terraform.plan.resourceChanges.where(type == "openstack_lb_listener_v2").all(
+        change.after.allowed_cidrs != null &&
+        change.after.allowed_cidrs.length > 0 &&
+        change.after.allowed_cidrs.containsNone(["0.0.0.0/0", "::/0"])
+      )
+  - uid: mondoo-openstack-security-listener-restricts-source-cidrs-terraform-state
+    filters: asset.platform == "terraform-state" && terraform.state.resources.contains(type == "openstack_lb_listener_v2")
+    mql: |
+      terraform.state.resources.where(type == "openstack_lb_listener_v2").all(
+        values.allowed_cidrs != null &&
+        values.allowed_cidrs.length > 0 &&
+        values.allowed_cidrs.containsNone(["0.0.0.0/0", "::/0"])
       )
 
   # No Terraform variants: terraform-provider-openstack has no Keystone trust resource. Trusts are created imperatively (CLI/API or by the Keystone-to-Keystone federation flow), so there is no HCL/plan/state representation to assert against. Re-evaluate if an openstack_identity_trust_v3 resource is added upstream.
@@ -2182,13 +3235,20 @@ queries:
             3. If clusters reference the template, create a replacement template with **Disable TLS** left unset. Existing clusters cannot switch templates: rebuild each cluster from the new template, move its workloads, then delete the old cluster and template.
         - id: cli
           desc: |
+            Magnum locks a cluster template once any cluster references it: a referenced template cannot be updated or deleted until every cluster built from it is gone. In-place patching therefore only works on templates that no cluster references yet. Even then, the docs do not enumerate which attributes accept a patch, so a `tls_disabled` update may be rejected; if it is, fall back to creating a replacement template.
+
             ```bash
-            # Fix the template in place while no clusters reference it
+            # Confirm no cluster references the template before attempting a patch
+            openstack coe cluster list
+
+            # Patch the template in place only while it is unreferenced; this may be
+            # rejected if Magnum treats tls_disabled as non-updatable
             openstack coe cluster template update secure-template replace tls_disabled=false
 
-            # If clusters reference it, create a TLS-enabled replacement
-            # (tls_disabled defaults to false) and rebuild clusters from it
-            openstack coe cluster template create secure-template \
+            # If clusters reference it (or the patch is rejected), create a
+            # TLS-enabled replacement (tls_disabled defaults to false) and rebuild
+            # clusters from it, then retire the old clusters and template
+            openstack coe cluster template create secure-template-v2 \
               --image fedora-coreos-38 --keypair ops-key \
               --external-network public --coe kubernetes \
               --flavor m1.small --docker-volume-size 10
@@ -2231,6 +3291,135 @@ queries:
     mql: |
       terraform.state.resources.where(type == "openstack_containerinfra_clustertemplate_v1").all(
         values.tls_disabled != true
+      )
+
+  - uid: mondoo-openstack-security-cluster-template-no-floating-ip
+    title: Ensure Magnum cluster templates do not enable floating IPs
+    impact: 80
+    tags:
+      compliance/bsi-sys-1-5: false
+      compliance/csa-cloud-controls-matrix-4: cloud-controls-matrix-4-ivs-06
+      compliance/dora: dora-art-9
+      compliance/hipaa: hipaa-security-ss164-312-e-1-transmission
+      compliance/iso-27001-2022: iso-27001-2022-a-8-22
+      compliance/nis-2: nis-2-21-2-i
+      compliance/nist-csf-1: nist-csf-1-pr-ac-5
+      compliance/nist-csf-2: nist-csf-2-pr-ir-01
+      compliance/nist-sp-800-53-rev5: nist-sp-800-53-rev5-sc-7
+      compliance/nist-sp-800-171: nist-sp-800-171--3-13-5
+      compliance/pci-dss-4: pcidss-requirement-1-4-1
+      compliance/soc2-2017: soc2-control-cc6-1-5
+      compliance/vda-isa-5: vda-isa-5-5-2-7
+    variants:
+      - uid: mondoo-openstack-security-cluster-template-no-floating-ip-openstack
+        tags:
+          mondoo.com/filter-title: OpenStack Project
+          mondoo.com/filter-icon: openstack
+      - uid: mondoo-openstack-security-cluster-template-no-floating-ip-terraform-hcl
+        tags:
+          mondoo.com/filter-title: Terraform HCL
+          mondoo.com/filter-icon: terraform
+      - uid: mondoo-openstack-security-cluster-template-no-floating-ip-terraform-plan
+        tags:
+          mondoo.com/filter-title: Terraform Plan
+          mondoo.com/filter-icon: terraform
+      - uid: mondoo-openstack-security-cluster-template-no-floating-ip-terraform-state
+        tags:
+          mondoo.com/filter-title: Terraform State
+          mondoo.com/filter-icon: terraform
+    docs:
+      desc: |
+        This check ensures that no Magnum cluster template sets `floating_ip_enabled = true`. When floating IPs are enabled, cluster nodes including the control plane are assigned public addresses at creation time, placing the Kubernetes API server and the nodes directly on the internet. Every cluster built from the template inherits that posture.
+
+        **Why this matters**
+
+        - **Control plane on the internet:** A control-plane node with a floating IP exposes the Kubernetes API server to the public internet, where it becomes a target for credential attacks and API-level exploits.
+        - **Node exposure:** Worker nodes with public addresses widen the attack surface to every service that binds to a node interface.
+        - **Template inheritance:** A single template with floating IPs enabled silently exposes every cluster created from it, so the fix belongs at the template.
+
+        **Risk mitigation**
+
+        - **Cluster takeover:** Keeping nodes on the private network removes the direct internet path to the control plane.
+        - **Reduced attack surface:** Without floating IPs, the cluster is reachable only through a deliberately placed load balancer or bastion rather than on every node.
+
+        Clusters that genuinely require public node addressing should front the API server with a load balancer and restrict access there rather than assigning floating IPs to every node.
+      audit: |
+        ### Audit via Horizon
+
+        1. Sign in to the OpenStack Horizon dashboard as a project member.
+        2. Open **Container Infra** then **Cluster Templates**.
+        3. Select each template and review whether **Enable Floating IP** is set.
+
+        A passing result shows floating IPs disabled for every template; a failing result shows a template with floating IPs enabled.
+
+        ### Audit via CLI
+
+        Run the OpenStack CLI and inspect the result:
+
+        ```bash
+        openstack coe cluster template show <template>
+        ```
+
+        A passing result shows `floating_ip_enabled` set to `False`; a failing result shows it set to `True`.
+      remediation:
+        - id: console
+          desc: |
+            1. Open **Container Infra → Cluster Templates** in Horizon.
+            2. If no cluster references the template, fix it with the CLI, since Horizon does not expose template patching.
+            3. If clusters reference the template, create a replacement template with **Enable Floating IP** left unset, rebuild each cluster from it, move workloads, then delete the old clusters and template.
+        - id: cli
+          desc: |
+            Magnum locks a cluster template once any cluster references it, so a referenced template cannot be changed in place. Create a replacement template with floating IPs disabled and rebuild clusters from it:
+
+            ```bash
+            # A referenced template cannot be patched; create a replacement with floating IPs disabled
+            openstack coe cluster template create secure-template-v2 \
+              --image fedora-coreos-38 --keypair ops-key \
+              --external-network public --coe kubernetes \
+              --flavor m1.small --docker-volume-size 10 \
+              --master-lb-enabled --floating-ip-disabled
+            ```
+
+            Rebuild clusters from the new template, move workloads, then retire the old clusters and template.
+        - id: terraform
+          desc: |
+            Either omit `floating_ip_enabled` on `openstack_containerinfra_clustertemplate_v1` (the default is `false`) or set it explicitly, and front the API server with a load balancer:
+
+            ```hcl
+            resource "openstack_containerinfra_clustertemplate_v1" "k8s" {
+              name                = "k8s"
+              image               = "fedora-coreos"
+              coe                 = "kubernetes"
+              external_network_id = openstack_networking_network_v2.public.id
+              floating_ip_enabled = false
+              master_lb_enabled   = true
+            }
+            ```
+    refs:
+      - url: https://docs.openstack.org/magnum/latest/user/index.html
+        title: OpenStack Magnum cluster templates
+
+  - uid: mondoo-openstack-security-cluster-template-no-floating-ip-openstack
+    filters: asset.platform == "openstack-project"
+    mql: |
+      openstack.clusterTemplates.all(floatingIpEnabled == false)
+  - uid: mondoo-openstack-security-cluster-template-no-floating-ip-terraform-hcl
+    filters: asset.platform == "terraform-hcl" && terraform.resources.contains(nameLabel == "openstack_containerinfra_clustertemplate_v1")
+    mql: |
+      terraform.resources("openstack_containerinfra_clustertemplate_v1").all(
+        arguments['floating_ip_enabled'] != true
+      )
+  - uid: mondoo-openstack-security-cluster-template-no-floating-ip-terraform-plan
+    filters: asset.platform == "terraform-plan" && terraform.plan.resourceChanges.contains(type == "openstack_containerinfra_clustertemplate_v1")
+    mql: |
+      terraform.plan.resourceChanges.where(type == "openstack_containerinfra_clustertemplate_v1").all(
+        change.after.floating_ip_enabled != true
+      )
+  - uid: mondoo-openstack-security-cluster-template-no-floating-ip-terraform-state
+    filters: asset.platform == "terraform-state" && terraform.state.resources.contains(type == "openstack_containerinfra_clustertemplate_v1")
+    mql: |
+      terraform.state.resources.where(type == "openstack_containerinfra_clustertemplate_v1").all(
+        values.floating_ip_enabled != true
       )
 
   - uid: mondoo-openstack-security-cluster-template-no-insecure-registry
@@ -2433,6 +3622,93 @@ queries:
               --nic net-id=6f2c1b3a-7e8d-4a5b-9c0d-1e2f3a4b5c6d
             ```
         # No Terraform remediation: see the note above the check — the public/private posture is a property of the network the instance attaches to, not a setting on the openstack_db_instance_v1 resource itself.
+    refs:
+      - url: https://docs.openstack.org/trove/latest/user/index.html
+        title: OpenStack Trove database instances
+
+  # No Terraform variants: the set of end-of-life datastore versions is defined per deployment by
+  # the operator's configured Trove datastores rather than a fixed managed catalog, and the version
+  # lives in the nested datastore block of openstack_db_instance_v1. A static EOL allowlist asserted
+  # against HCL, plan, or state would be unreliable across deployments, so this check is runtime-only.
+  - uid: mondoo-openstack-security-database-supported-version
+    title: Ensure Trove database instances run a supported engine version
+    impact: 70
+    filters: asset.platform == "openstack-project"
+    mql: |
+      openstack.databaseInstances.where(datastoreType.downcase == "mysql").all(datastoreVersion.notIn(["5.5", "5.6", "5.7"]))
+      openstack.databaseInstances.where(datastoreType.downcase == "mariadb").all(datastoreVersion.notIn(["5.5", "10.0", "10.1", "10.2", "10.3", "10.4", "10.5"]))
+      openstack.databaseInstances.where(datastoreType.downcase == "postgresql").all(datastoreVersion.notIn(["9.4", "9.5", "9.6", "10", "11", "12", "13"]))
+    tags:
+      compliance/bsi-sys-1-5: false
+      compliance/csa-cloud-controls-matrix-4: cloud-controls-matrix-4-tvm-03
+      compliance/dora: dora-art-9
+      compliance/hipaa: false
+      compliance/iso-27001-2022: iso-27001-2022-a-8-8
+      compliance/nis-2: nis-2-21-2-e
+      compliance/nist-csf-1: nist-csf-1-pr-ip-12
+      compliance/nist-csf-2: nist-csf-2-pr-ps-02
+      compliance/nist-sp-800-53-rev5: nist-sp-800-53-rev5-si-2
+      compliance/nist-sp-800-171: nist-sp-800-171--3-14-1
+      compliance/pci-dss-4: pcidss-requirement-6-3-3
+      compliance/soc2-2017: soc2-control-cc7-1-5
+      compliance/vda-isa-5: vda-isa-5-5-2-5
+    docs:
+      desc: |
+        This check ensures that Trove managed database instances are not running a MySQL, MariaDB, or PostgreSQL engine version that has reached end of life upstream. End-of-life engines no longer receive security patches, so newly disclosed vulnerabilities in them go unfixed. The version ranges flagged here track the upstream end-of-life dates and may need adjustment as additional versions age out.
+
+        **Why this matters**
+
+        - **No security patches:** An end-of-life database engine does not receive fixes for newly disclosed CVEs, so known vulnerabilities accumulate without remediation.
+        - **Active exploitation:** Known-exploited flaws in older MySQL, MariaDB, and PostgreSQL releases are routinely weaponized against reachable database listeners.
+        - **Compliance exposure:** Most frameworks require software components to receive vendor security support, which end-of-life engines no longer do.
+
+        **Risk mitigation**
+
+        - **Patch coverage:** Moving to a supported major version restores the flow of security patches and closes accumulating CVE exposure.
+        - **Supported upgrade path:** Acting before an engine reaches end of life avoids a more disruptive cold migration later.
+      audit: |
+        ### Audit via Horizon
+
+        1. Sign in to the OpenStack Horizon dashboard as a project member.
+        2. Open **Database** then **Instances**.
+        3. Review the datastore type and version for each instance.
+
+        A passing instance runs a datastore version still supported upstream. A failing instance runs an end-of-life version such as MySQL 5.6 or 5.7, MariaDB 10.5 or older, or PostgreSQL 13 or older.
+
+        ### Audit via CLI
+
+        Run the OpenStack CLI and inspect the result. Treat the datastore versions the deployment currently offers as the authoritative supported set:
+
+        ```bash
+        openstack database instance list
+        openstack datastore version list <datastore>
+        ```
+
+        A passing instance runs a version the operator still offers and that upstream still supports. A failing instance runs a version past its upstream end-of-life date.
+      remediation:
+        - id: console
+          desc: |
+            Trove does not perform an in-place major-version upgrade through Horizon. Create a replacement instance on a supported datastore version and migrate the data:
+
+            1. Open **Database → Instances** and note the datastore type, version, flavor, and network of the affected instance.
+            2. Launch a new instance on a supported datastore version with the same flavor and network.
+            3. Migrate the data with the engine's native tools, repoint applications, and delete the original instance once verified.
+        - id: cli
+          desc: |
+            Create a replacement instance on a supported datastore version and migrate the data, since Trove does not perform an in-place major-version upgrade:
+
+            ```bash
+            openstack datastore version list mysql
+            openstack database instance create db-upgraded \
+              --flavor m1.small --size 10 \
+              --datastore mysql --datastore-version 8.0 \
+              --nic net-id=6f2c1b3a-7e8d-4a5b-9c0d-1e2f3a4b5c6d
+            ```
+
+            Migrate the data with the engine's native tools, repoint applications, then delete the original instance.
+        # No Terraform remediation: Trove does not support an in-place major-version upgrade, and the
+        # supported version set is deployment-specific, so the fix is a data migration to a new
+        # instance rather than a Terraform field change.
     refs:
       - url: https://docs.openstack.org/trove/latest/user/index.html
         title: OpenStack Trove database instances

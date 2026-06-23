@@ -3,7 +3,7 @@
 policies:
   - uid: mondoo-aws-security
     name: Mondoo AWS Security
-    version: 12.2.1
+    version: 12.2.2
     license: BUSL-1.1
     tags:
       mondoo.com/category: security
@@ -2865,7 +2865,9 @@ queries:
             To ensure EBS volume encryption is enabled by default in Terraform, ensure EBS encryption is enabled by default:
 
             ```hcl
-            resource "aws_ebs_encryption_by_default" "default_encryption" {}
+            resource "aws_ebs_encryption_by_default" "default_encryption" {
+              enabled = true
+            }
             ```
 
             To use a specific KMS key for encryption:
@@ -4492,18 +4494,18 @@ queries:
           mondoo.com/filter-icon: terraform
     docs:
       desc: |
-        This check ensures that the resource-based policy attached to each AWS Lambda function contains no statements that grant invocation rights to the wildcard principal (`*`). By default, Lambda functions have no resource-based policy, but policies added for service integrations or cross-account access can inadvertently include a wildcard principal that exposes the function to any AWS identity or unauthenticated caller.
+        This check ensures that the resource-based policy attached to each AWS Lambda function contains no statements that grant unscoped invocation rights to the wildcard principal (`*`). By default, Lambda functions have no resource-based policy, but policies added for service integrations or cross-account access can inadvertently include a wildcard principal that exposes the function to any AWS identity or unauthenticated caller unless constrained by a condition such as `AWS:SourceArn`, `AWS:SourceAccount`, or `aws:PrincipalOrgID`. Source conditions should be specific; avoid wildcard source ARN values that effectively grant broad invoke access.
 
         **Why this matters**
 
-        - **Unauthorized invocation:** A wildcard principal in an Allow statement lets any AWS account or unauthenticated caller trigger the function, potentially executing privileged business logic or reading sensitive data processed by the handler.
+        - **Unauthorized invocation:** An unscoped wildcard principal in an Allow statement lets any AWS account or unauthenticated caller trigger the function, potentially executing privileged business logic or reading sensitive data processed by the handler.
         - **Data exposure:** Functions that process customer records, access databases, or call downstream services can become a path to sensitive information when invocable by arbitrary callers.
         - **Amplification risk:** Publicly invocable functions can be used as a compute amplifier in denial-of-service or cryptomining attacks at the account owner's expense.
         - **Least-privilege enforcement:** Restricting invocation to named principals enforces the minimum-access model required by most security frameworks for compute resources.
 
         **Risk mitigation**
 
-        - **Explicit principal scoping:** Replacing wildcard principals with specific AWS account IDs, service principals, or ARNs ensures only authorized callers can invoke the function.
+        - **Explicit principal scoping:** Replacing wildcard principals with specific AWS account IDs, service principals, or ARNs ensures only authorized callers can invoke the function. If wildcard access is required, bind it to a fixed source ARN, source account, or organization condition.
         - **Reduced attack surface:** Removing public invoke permissions eliminates the most direct exploitation path for functions that handle sensitive workloads or privileged AWS API calls.
       audit: |
         ### Audit via Console
@@ -4512,9 +4514,9 @@ queries:
         2. In the left navigation pane, select **Functions**.
         3. Select a function and open the **Configuration** tab.
         4. Select **Permissions** in the sub-navigation.
-        5. Under **Resource-based policy statements**, review each statement for a `Principal` of `*` or `{"AWS": "*"}`.
+        5. Under **Resource-based policy statements**, review each `Allow` statement for a `Principal` of `*` or `{"AWS": "*"}` without a scoping condition such as `AWS:SourceArn`, `AWS:SourceAccount`, or `aws:PrincipalOrgID`.
 
-        A passing function either has no resource-based policy or has a policy with no statements granting `Allow` to principal `*`. A failing function has one or more policy statements with `Effect: Allow` and `Principal: *` (or `AWS: *`).
+        A passing function either has no resource-based policy or has no unscoped wildcard-principal `Allow` statements. A failing function has one or more policy statements with `Effect: Allow` and `Principal: *` (or `AWS: *`) without a restrictive condition.
 
         ### Audit via CLI
 
@@ -4527,9 +4529,9 @@ queries:
           --output text | python3 -m json.tool
         ```
 
-        Inspect each statement in the returned policy document for `"Principal": "*"` or `"Principal": {"AWS": "*"}` combined with `"Effect": "Allow"`.
+        Inspect each statement in the returned policy document for `"Principal": "*"` or `"Principal": {"AWS": "*"}` combined with `"Effect": "Allow"` and no restrictive `Condition`.
 
-        A passing function has no such statement (or returns a `ResourceNotFoundException` indicating no resource-based policy exists). A failing function has at least one `Allow` statement with a wildcard principal.
+        A passing function has no such statement (or returns a `ResourceNotFoundException` indicating no resource-based policy exists). A failing function has at least one unscoped `Allow` statement with a wildcard principal.
 
       remediation:
         - id: console
@@ -4540,7 +4542,7 @@ queries:
             2. Select Functions in the left panel.
             3. Select the Lambda function that has public access.
             4. Go to the Configuration tab and select Permissions.
-            5. Under Resource-based policy, check for any policy statements with "Principal": "*" or "Principal": {"AWS": "*"}.
+            5. Under Resource-based policy, check for any `Allow` statements with "Principal": "*" or "Principal": {"AWS": "*"} and no restrictive `Condition`.
             6. Select Edit to modify the resource-based policy.
             7. Remove or update any policy statements that allow public access, restricting access to specific AWS accounts or services.
             8. Select Save to apply the changes.
@@ -4581,7 +4583,7 @@ queries:
               filename      = "lambda.zip"
             }
 
-            # Use a proper permission policy without public access
+            # Use a specific service principal and restrict it to the intended source
             resource "aws_lambda_permission" "secure_permission" {
               statement_id  = "AllowExecutionFromSpecificAccount"
               action        = "lambda:InvokeFunction"
@@ -4628,24 +4630,85 @@ queries:
     filters: |
       asset.platform == "aws-lambda-function"
     mql: |
-      aws.lambda.function.policy.Statement.where(Effect == "Allow").all(Principal {AWS {_ != "*"}})
+      # Null covers functions without a resource policy; empty covers empty policy documents.
+      # MQL short-circuits before Statement access when the policy is absent.
+      aws.lambda.function.policy == null ||
+      aws.lambda.function.policy == empty ||
+      aws.lambda.function.policy.Statement == null ||
+      aws.lambda.function.policy.Statement == empty ||
+      aws.lambda.function.policy.Statement.where(Effect == "Allow").where(
+        # AWS principals can be encoded as a string or a list; contains(/^\*$/) covers list entries exactly equal to "*".
+        Principal == "*" ||
+        Principal['AWS'] == "*" ||
+        Principal['AWS'].contains(/^\*$/) ||
+        Principal['Service'] == "*" ||
+        Principal['Service'].contains(/^\*$/)
+      ).all(
+        # Require at least one recognized source condition without a bare wildcard value.
+        Condition != null &&
+        Condition.values.any(
+          _.where(key == /aws:(SourceArn|SourceAccount|PrincipalOrgID)/i) != empty &&
+          # values.contains catches scalar values; values.any catches list-valued condition values.
+          _.where(key == /aws:(SourceArn|SourceAccount|PrincipalOrgID)/i).values.contains(/^\*$/) == false &&
+          _.where(key == /aws:(SourceArn|SourceAccount|PrincipalOrgID)/i).values.any(_.contains(/^\*$/)) == false
+        )
+      )
   - uid: mondoo-aws-security-lambda-function-public-access-prohibited-terraform-hcl
     filters: asset.platform == "terraform-hcl" && terraform.resources.contains(nameLabel == "aws_lambda_permission")
     mql: |
-      terraform.resources("aws_lambda_permission").none(
-        arguments.principal == "*"
+      terraform.resources.where(nameLabel == "aws_lambda_permission").where(arguments.principal == "*").all(
+        arguments.source_arn != empty ||
+        arguments.source_account != empty ||
+        arguments.principal_org_id != empty
+      ) &&
+      # Validate each provided scope separately after requiring at least one scope.
+      # Partial source ARN wildcards are intentionally treated as broad access.
+      terraform.resources.where(nameLabel == "aws_lambda_permission").where(arguments.principal == "*" && arguments.source_arn != empty).all(
+        arguments.source_arn != /\*/
+      ) &&
+      terraform.resources.where(nameLabel == "aws_lambda_permission").where(arguments.principal == "*" && arguments.source_account != empty).all(
+        arguments.source_account != "*"
+      ) &&
+      terraform.resources.where(nameLabel == "aws_lambda_permission").where(arguments.principal == "*" && arguments.principal_org_id != empty).all(
+        arguments.principal_org_id != "*"
       )
   - uid: mondoo-aws-security-lambda-function-public-access-prohibited-terraform-plan
     filters: asset.platform == "terraform-plan" && terraform.plan.resourceChanges.contains(type == "aws_lambda_permission")
     mql: |
-      terraform.plan.resourceChanges.where(type == "aws_lambda_permission").none(
-        change.after.principal == "*"
+      terraform.plan.resourceChanges.where(type == "aws_lambda_permission").where(change.after.principal == "*").all(
+        change.after.source_arn != empty ||
+        change.after.source_account != empty ||
+        change.after.principal_org_id != empty
+      ) &&
+      # Validate each provided scope separately after requiring at least one scope.
+      # Partial source ARN wildcards are intentionally treated as broad access.
+      terraform.plan.resourceChanges.where(type == "aws_lambda_permission").where(change.after.principal == "*" && change.after.source_arn != empty).all(
+        change.after.source_arn != /\*/
+      ) &&
+      terraform.plan.resourceChanges.where(type == "aws_lambda_permission").where(change.after.principal == "*" && change.after.source_account != empty).all(
+        change.after.source_account != "*"
+      ) &&
+      terraform.plan.resourceChanges.where(type == "aws_lambda_permission").where(change.after.principal == "*" && change.after.principal_org_id != empty).all(
+        change.after.principal_org_id != "*"
       )
   - uid: mondoo-aws-security-lambda-function-public-access-prohibited-terraform-state
     filters: asset.platform == "terraform-state" && terraform.state.resources.contains(type == "aws_lambda_permission")
     mql: |
-      terraform.state.resources.where(type == "aws_lambda_permission").none(
-        values.principal == "*"
+      terraform.state.resources.where(type == "aws_lambda_permission").where(values.principal == "*").all(
+        values.source_arn != empty ||
+        values.source_account != empty ||
+        values.principal_org_id != empty
+      ) &&
+      # Validate each provided scope separately after requiring at least one scope.
+      # Partial source ARN wildcards are intentionally treated as broad access.
+      terraform.state.resources.where(type == "aws_lambda_permission").where(values.principal == "*" && values.source_arn != empty).all(
+        values.source_arn != /\*/
+      ) &&
+      terraform.state.resources.where(type == "aws_lambda_permission").where(values.principal == "*" && values.source_account != empty).all(
+        values.source_account != "*"
+      ) &&
+      terraform.state.resources.where(type == "aws_lambda_permission").where(values.principal == "*" && values.principal_org_id != empty).all(
+        values.principal_org_id != "*"
       )
   # No Terraform variants: Pending OS upgrades are runtime telemetry on the live instance (`pendingMaintenanceActions`), not configuration. There is no Terraform attribute that represents pending maintenance actions.
   - uid: mondoo-aws-security-rds-instance-no-pending-os-upgrades
@@ -4890,7 +4953,7 @@ queries:
               --db-snapshot-identifier encrypted-snapshot
             ```
 
-            After verification, delete the unencrypted instance:
+            After verifying the new encrypted instance is healthy and all data migrated successfully, delete the unencrypted instance. **Warning:** `--skip-final-snapshot` permanently deletes the instance with no recovery point. Omit it (and pass `--final-db-snapshot-identifier`) if you want a final backup before deletion:
 
             ```bash
             aws rds delete-db-instance \
@@ -4899,7 +4962,7 @@ queries:
             ```
         - id: terraform
           desc: |
-            To ensure all RDS instances are enabled for encryption-at-rest in Terraform:
+            To ensure all RDS instances are enabled for encryption-at-rest in Terraform. Supply the master password from a variable backed by AWS Secrets Manager rather than a literal value:
 
             ```hcl
             # Create a KMS key for RDS encryption
@@ -4917,7 +4980,7 @@ queries:
               allocated_storage    = 20
               storage_type         = "gp2"
               username             = "admin"
-              password             = "YourSecurePassword123"
+              password             = var.db_password
 
               # Enable encryption
               storage_encrypted    = true
@@ -4930,7 +4993,7 @@ queries:
             ```
         - id: cloudformation
           desc: |
-            To ensure all RDS instances are enabled for encryption-at-rest in CloudFormation:
+            To ensure all RDS instances are enabled for encryption-at-rest in CloudFormation. Supply the master password through a NoEcho parameter resolved from AWS Secrets Manager rather than a literal value:
 
             ```yaml
             Resources:
@@ -4958,7 +5021,7 @@ queries:
                   AllocatedStorage: 20
                   StorageType: "gp2"
                   MasterUsername: "admin"
-                  MasterUserPassword: "YourSecurePassword123"
+                  MasterUserPassword: !Ref DBPassword
 
                   # Enable encryption
                   StorageEncrypted: true
@@ -5461,7 +5524,7 @@ queries:
             5. Once migration is complete, decommission the unencrypted cluster.
         - id: cli
           desc: |
-            To ensure all RDS clusters are set to be encrypted-at-rest using the AWS CLI, export data from unencrypted cluster (for MySQL):
+            To ensure all RDS clusters are set to be encrypted-at-rest using the AWS CLI. Retrieve the master password from AWS Secrets Manager into the `DB_MASTER_PASSWORD` environment variable rather than hardcoding it. Export data from the unencrypted cluster (for MySQL):
 
             ```bash
             # Use the RDS export feature to S3
@@ -5481,7 +5544,7 @@ queries:
               --engine aurora-mysql \
               --engine-version 5.7.mysql_aurora.2.10.2 \
               --master-username admin \
-              --master-user-password YourSecurePassword123 \
+              --master-user-password "$DB_MASTER_PASSWORD" \
               --storage-encrypted \
               --kms-key-id arn:aws:kms:region:account-id:key/key-id
             ```
@@ -5496,7 +5559,7 @@ queries:
               --db-instance-class db.r5.large
             ```
 
-            After migration and verification, delete the unencrypted cluster:
+            After migration and verification, delete the unencrypted cluster. **Warning:** every member DB instance must be deleted before the cluster delete succeeds, and `--skip-final-snapshot` permanently deletes the cluster with no recovery point. Omit it (and pass `--final-db-snapshot-identifier`) to retain a final backup:
 
             ```bash
             aws rds delete-db-cluster \
@@ -5545,7 +5608,7 @@ queries:
             ```
         - id: cloudformation
           desc: |
-            To ensure all RDS clusters are set to be encrypted-at-rest in CloudFormation:
+            To ensure all RDS clusters are set to be encrypted-at-rest in CloudFormation. Supply the master password through a NoEcho parameter resolved from AWS Secrets Manager rather than a literal value:
 
             ```yaml
             Resources:
@@ -5575,7 +5638,7 @@ queries:
                     - !Select [2, !GetAZs ""]
                   DatabaseName: "production"
                   MasterUsername: "admin"
-                  MasterUserPassword: "YourSecurePassword123"
+                  MasterUserPassword: !Ref DBPassword
                   BackupRetentionPeriod: 7
                   PreferredBackupWindow: "07:00-09:00"
 
@@ -5660,18 +5723,18 @@ queries:
           mondoo.com/filter-icon: terraform
     docs:
       desc: |
-        This check ensures that Amazon RDS cluster instances are not configured as publicly accessible and that the VPC subnets hosting the cluster do not route traffic through an internet gateway. By default, the AWS console offers a publicly accessible option during cluster creation, and it is easy to inadvertently expose a cluster to the internet.
+        This check ensures that Amazon RDS cluster instances are not configured as publicly accessible. Aurora exposes public accessibility on the member DB instances, while non-Aurora Multi-AZ DB clusters also expose a cluster-level public accessibility field. By default, the AWS console offers a publicly accessible option during cluster creation, and it is easy to inadvertently expose a cluster to the internet.
 
         **Why this matters**
 
         - **Direct internet exposure:** A publicly accessible RDS cluster has a DNS endpoint resolvable from the internet, making the database authentication layer directly reachable to any attacker worldwide.
         - **Brute-force attack surface:** Once a database endpoint is reachable from the internet, automated credential stuffing and brute-force tools can target it continuously without needing to first compromise any other resource.
-        - **Compliance boundary violation:** Most security frameworks explicitly prohibit placing production database clusters on network segments with internet gateway routes, treating such configuration as a boundary control failure.
+        - **Compliance boundary violation:** Most security frameworks explicitly prohibit configuring production database clusters for direct public reachability, treating such configuration as a boundary control failure.
         - **Lateral movement risk:** A compromised publicly accessible cluster becomes a pivot point from which attackers can reach other private resources within the same VPC.
 
         **Risk mitigation**
 
-        - **Network perimeter enforcement:** Deploying clusters in private subnets and removing internet gateway routes ensures the database is only reachable through controlled paths such as VPN, bastion host, or AWS PrivateLink.
+        - **Network perimeter enforcement:** Disabling public accessibility on every cluster member ensures the database is only reachable through controlled paths such as VPN, bastion host, or AWS PrivateLink.
         - **Reduced credential exposure:** Removing internet reachability eliminates the entire class of attacks that require only a network path to the database port, requiring attackers to first compromise an internal resource.
       audit: |
         ### Audit via Console
@@ -5680,10 +5743,10 @@ queries:
         2. In the left navigation pane, select **Databases**.
         3. Select an RDS cluster and open the **Connectivity & security** tab.
         4. Under **Security**, review the VPC, subnet group, and security groups.
-        5. Verify that the subnet group uses private subnets (no route to an internet gateway with destination `0.0.0.0/0`).
-        6. For each DB instance in the cluster, check the **Publicly accessible** field.
+        5. For each DB instance in the cluster, check the **Publicly accessible** field.
+        6. For non-Aurora Multi-AZ DB clusters, also check the cluster-level **Publicly accessible** field.
 
-        A passing cluster and its instances either show **Not publicly accessible** or are in subnets with no internet gateway route. A failing cluster has instances that are publicly accessible or has a security group associated with a VPC whose route table includes a `0.0.0.0/0` route via an internet gateway.
+        A passing cluster and its instances show **Not publicly accessible**. A failing cluster has at least one member DB instance, or the non-Aurora cluster itself, configured as publicly accessible.
 
         ### Audit via CLI
 
@@ -5695,16 +5758,15 @@ queries:
           --output table
         ```
 
-        2. Verify that the VPC route tables used by the cluster's subnets do not have an internet gateway route:
+        2. Check non-Aurora cluster-level public accessibility:
 
         ```bash
-        aws ec2 describe-route-tables \
-          --filters "Name=vpc-id,Values=<vpc-id>" \
-          --query "RouteTables[*].Routes[?GatewayId!=null && starts_with(GatewayId, 'igw-')].{DestinationCidrBlock:DestinationCidrBlock,GatewayId:GatewayId}" \
+        aws rds describe-db-clusters \
+          --query "DBClusters[*].{ClusterId:DBClusterIdentifier,PubliclyAccessible:PubliclyAccessible}" \
           --output table
         ```
 
-        A passing cluster has all instances with `PubliclyAccessible: false` and no internet gateway routes (`igw-*`) with destination `0.0.0.0/0` in its VPC route tables. A failing cluster has at least one instance with `PubliclyAccessible: true` or has an internet gateway route reachable from the cluster's security groups.
+        A passing cluster has all member instances with `PubliclyAccessible: false` and, when AWS exposes the cluster-level field, the cluster also has `PubliclyAccessible: false`. A failing cluster has at least one member instance or cluster-level field set to `true`.
 
       remediation:
         - id: console
@@ -5793,7 +5855,7 @@ queries:
             ```
         - id: cloudformation
           desc: |
-            To ensure all RDS clusters are not publicly accessible in CloudFormation, ensure RDS clusters are not publicly accessible:
+            To ensure all RDS clusters are not publicly accessible in CloudFormation, ensure RDS clusters are not publicly accessible. Supply the master password through a NoEcho parameter resolved from AWS Secrets Manager rather than a literal value:
 
             ```yaml
               Resources:
@@ -5803,7 +5865,7 @@ queries:
                     Engine: "aurora-mysql"
                     DBClusterIdentifier: "secure-rds-cluster"
                     MasterUsername: "admin"
-                    MasterUserPassword: "YourSecurePassword123"
+                    MasterUserPassword: !Ref DBPassword
                     VpcSecurityGroupIds:
                       - !Ref PrivateSecurityGroup
                     DBSubnetGroupName: !Ref PrivateDBSubnetGroup
@@ -5850,27 +5912,34 @@ queries:
     filters: |
       asset.platform == "aws-rds-dbcluster"
     mql: |
-      aws.rds.dbcluster.securityGroups.where(
-        vpc.routeTables.where(
-          routeEntries.any(gatewayId == /igw-/ && destinationCidrBlock == "0.0.0.0/0")
-        ).length > 0
-      ).length == 0
+      # Aurora clusters do not expose a cluster-level PubliclyAccessible field.
+      aws.rds.dbcluster.publiclyAccessible != true &&
+      aws.rds.dbcluster.members.all(publiclyAccessible == false)
   - uid: mondoo-aws-security-rds-cluster-public-access-check-terraform-hcl
-    filters: asset.platform == "terraform-hcl" && terraform.resources.contains(nameLabel == "aws_rds_cluster")
+    filters: asset.platform == "terraform-hcl" && terraform.resources.contains(nameLabel == "aws_rds_cluster" || nameLabel == "aws_rds_cluster_instance")
     mql: |
       terraform.resources("aws_rds_cluster").all(
         arguments['publicly_accessible'] != true
+      ) &&
+      terraform.resources.where(nameLabel == "aws_rds_cluster_instance").all(
+        arguments['publicly_accessible'] != true
       )
   - uid: mondoo-aws-security-rds-cluster-public-access-check-terraform-plan
-    filters: asset.platform == "terraform-plan" && terraform.plan.resourceChanges.contains(type == "aws_rds_cluster")
+    filters: asset.platform == "terraform-plan" && terraform.plan.resourceChanges.contains(type == "aws_rds_cluster" || type == "aws_rds_cluster_instance")
     mql: |
       terraform.plan.resourceChanges.where(type == "aws_rds_cluster").all(
         change.after.publicly_accessible != true
+      ) &&
+      terraform.plan.resourceChanges.where(type == "aws_rds_cluster_instance").all(
+        change.after.publicly_accessible != true
       )
   - uid: mondoo-aws-security-rds-cluster-public-access-check-terraform-state
-    filters: asset.platform == "terraform-state" && terraform.state.resources.contains(type == "aws_rds_cluster")
+    filters: asset.platform == "terraform-state" && terraform.state.resources.contains(type == "aws_rds_cluster" || type == "aws_rds_cluster_instance")
     mql: |
       terraform.state.resources.where(type == "aws_rds_cluster").all(
+        values.publicly_accessible != true
+      ) &&
+      terraform.state.resources.where(type == "aws_rds_cluster_instance").all(
         values.publicly_accessible != true
       )
   - uid: mondoo-aws-security-rds-instance-public-access-check
@@ -6199,7 +6268,7 @@ queries:
             ```
         - id: cloudformation
           desc: |
-            To ensure Redshift clusters are not publicly accessible in CloudFormation, ensure Redshift clusters are not publicly accessible:
+            To ensure Redshift clusters are not publicly accessible in CloudFormation, ensure Redshift clusters are not publicly accessible. Supply the master password through a NoEcho parameter resolved from AWS Secrets Manager rather than a literal value:
 
             ```yaml
             Resources:
@@ -6209,7 +6278,7 @@ queries:
                   ClusterIdentifier: "secure-redshift-cluster"
                   NodeType: "dc2.large"
                   MasterUsername: "admin"
-                  MasterUserPassword: "securepassword"
+                  MasterUserPassword: !Ref RedshiftMasterPassword
                   PubliclyAccessible: false
                   ClusterSubnetGroupName: !Ref PrivateRedshiftSubnetGroup
 
@@ -8382,10 +8451,10 @@ queries:
             1. Navigate to the AWS EC2 Console.
             2. Select Load Balancers under the Load Balancing section.
             3. Select an Application Load Balancer (ALB).
-            4. Select the Description tab.
-            5. Under Deletion Protection, check if it is enabled.
+            4. Select the Attributes tab.
+            5. Under Configuration, check whether Deletion protection is enabled.
             6. If it is disabled, modify the setting:
-              - Select Edit attributes.
+              - Select Edit.
               - Enable Deletion protection.
               - Select Save changes.
         - id: cli
@@ -8514,7 +8583,7 @@ queries:
           mondoo.com/filter-icon: cloudformation
     docs:
       desc: |
-        This check ensures that Amazon Elasticsearch Service domains are configured with encryption at rest enabled. By default, Elasticsearch Service domains do not encrypt stored data unless encryption is explicitly enabled at domain creation time; existing unencrypted domains cannot be converted and must be replaced to achieve compliance.
+        This check ensures that Amazon OpenSearch Service domains are configured with encryption at rest enabled. By default, OpenSearch Service domains do not encrypt stored data unless encryption is explicitly enabled at domain creation time; existing unencrypted domains cannot be converted and must be replaced to achieve compliance.
 
         **Why this matters**
 
@@ -8549,11 +8618,11 @@ queries:
       remediation:
         - id: console
           desc: |
-            To ensure Elasticsearch Service domains have encryption at rest using the AWS Console:
+            To ensure OpenSearch Service domains have encryption at rest using the AWS Console:
 
-            1.  Navigate to the Amazon Elasticsearch Service Console.
+            1.  Navigate to the Amazon OpenSearch Service Console.
             2.  Select Domains in the left panel.
-            3.  Select an Elasticsearch domain and go to the Security tab.
+            3.  Select a domain and go to the Security tab.
             4.  Under Encryption at rest, check if encryption is enabled.
             5.  For domains running Elasticsearch 6.7 or later, enable encryption on the existing domain:
               - Select Edit security configuration.
@@ -8587,9 +8656,9 @@ queries:
               enable_key_rotation = true
             }
 
-            resource "aws_elasticsearch_domain" "secure_es" {
-              domain_name           = "secure-es-domain"
-              elasticsearch_version = "7.10"
+            resource "aws_opensearch_domain" "secure_es" {
+              domain_name    = "secure-es-domain"
+              engine_version = "OpenSearch_2.11"
 
               encrypt_at_rest {
                 enabled    = true
@@ -8604,10 +8673,10 @@ queries:
             ```yaml
             Resources:
               SecureESDomain:
-                Type: "AWS::Elasticsearch::Domain"
+                Type: "AWS::OpenSearchService::Domain"
                 Properties:
                   DomainName: "secure-es-domain"
-                  ElasticsearchVersion: "7.10"
+                  EngineVersion: "OpenSearch_2.11"
                   EncryptionAtRestOptions:
                     Enabled: true
                     KmsKeyId: !Ref ESKMSKey
@@ -8694,7 +8763,7 @@ queries:
           mondoo.com/filter-icon: cloudformation
     docs:
       desc: |
-        This check ensures that Amazon Elasticsearch Service domains have node-to-node encryption enabled. Node-to-node encryption provides an additional layer of security by encrypting data as it is transferred between nodes within the Elasticsearch cluster, protecting against potential internal network eavesdropping.
+        This check ensures that Amazon OpenSearch Service domains have node-to-node encryption enabled. Node-to-node encryption provides an additional layer of security by encrypting data as it is transferred between nodes within the cluster, protecting against potential internal network eavesdropping.
 
         **Why this matters**
 
@@ -8729,9 +8798,9 @@ queries:
       remediation:
         - id: console
           desc: |
-            To ensure Amazon Elasticsearch Service domains use node-to-node encryption using the AWS Console:
+            To ensure Amazon OpenSearch Service domains use node-to-node encryption using the AWS Console:
 
-            1. Navigate to the Amazon Elasticsearch Service Console.
+            1. Navigate to the Amazon OpenSearch Service Console.
             2. Select the domain you want to update.
             3. Select Edit security configuration.
             4. Enable Node-to-node encryption.
@@ -8740,7 +8809,7 @@ queries:
             Note: Enabling node-to-node encryption on an existing domain requires a blue/green deployment. Plan for potential downtime.
         - id: cli
           desc: |
-            To ensure Amazon Elasticsearch Service domains use node-to-node encryption using the AWS CLI, check if node-to-node encryption is enabled:
+            To ensure Amazon OpenSearch Service domains use node-to-node encryption using the AWS CLI, check if node-to-node encryption is enabled:
 
             ```bash
             aws es describe-elasticsearch-domain --domain-name <domain-name> \
@@ -8755,12 +8824,12 @@ queries:
             ```
         - id: terraform
           desc: |
-            To ensure Amazon Elasticsearch Service domains use node-to-node encryption in Terraform:
+            To ensure Amazon OpenSearch Service domains use node-to-node encryption in Terraform:
 
             ```hcl
-            resource "aws_elasticsearch_domain" "example" {
-              domain_name           = "example-domain"
-              elasticsearch_version = "7.10"
+            resource "aws_opensearch_domain" "example" {
+              domain_name    = "example-domain"
+              engine_version = "OpenSearch_2.11"
 
               node_to_node_encryption {
                 enabled = true
@@ -8769,15 +8838,15 @@ queries:
             ```
         - id: cloudformation
           desc: |
-            To ensure Amazon Elasticsearch Service domains use node-to-node encryption in CloudFormation:
+            To ensure Amazon OpenSearch Service domains use node-to-node encryption in CloudFormation:
 
             ```yaml
             Resources:
               ElasticsearchDomain:
-                Type: "AWS::Elasticsearch::Domain"
+                Type: "AWS::OpenSearchService::Domain"
                 Properties:
                   DomainName: "example-domain"
-                  ElasticsearchVersion: "7.10"
+                  EngineVersion: "OpenSearch_2.11"
                   NodeToNodeEncryptionOptions:
                     Enabled: true
             ```
@@ -13808,11 +13877,11 @@ queries:
               --query "DomainStatus.AdvancedSecurityOptions.Enabled"
             ```
 
-            Enable fine-grained access control:
+            Enable fine-grained access control. Retrieve the master password from AWS Secrets Manager into the `MASTER_PASSWORD` environment variable rather than hardcoding it. **Warning:** fine-grained access control cannot be disabled once enabled without recreating the domain, and applying this change triggers a blue/green deployment:
 
             ```bash
             aws opensearch update-domain-config --domain-name <domain-name> \
-              --advanced-security-options '{"Enabled": true, "InternalUserDatabaseEnabled": true, "MasterUserOptions": {"MasterUserName": "admin", "MasterUserPassword": "SecurePassword123!"}}'
+              --advanced-security-options "{\"Enabled\": true, \"InternalUserDatabaseEnabled\": true, \"MasterUserOptions\": {\"MasterUserName\": \"admin\", \"MasterUserPassword\": \"$MASTER_PASSWORD\"}}"
             ```
         - id: terraform
           desc: |
@@ -19198,7 +19267,7 @@ queries:
             4. Note: Encryption cannot be changed after vault creation.
         - id: cli
           desc: |
-            To ensure AWS Backup vaults are encrypted using the AWS CLI:
+            To ensure AWS Backup vaults are encrypted using the AWS CLI. **Note:** vault encryption is fixed at creation and cannot be changed, so remediation means creating a new encrypted vault, repointing backup plans to it, copying or recreating recovery points, and deleting the old vault once empty:
 
             ```bash
             aws backup create-backup-vault \
@@ -19207,7 +19276,7 @@ queries:
             ```
         - id: terraform
           desc: |
-            To ensure AWS Backup vaults are encrypted in Terraform:
+            To ensure AWS Backup vaults are encrypted in Terraform. **Note:** vault encryption is fixed at creation; applying this to an existing vault forces a replacement, so repoint backup plans and migrate recovery points to the new vault rather than leaving the old one running:
 
             ```hcl
             resource "aws_backup_vault" "example" {
@@ -30991,7 +31060,7 @@ queries:
             5. Delete the old cluster after verifying the migration.
         - id: cli
           desc: |
-            To ensure MemoryDB clusters have encryption in transit (TLS) enabled using the AWS CLI, create a new MemoryDB cluster with TLS enabled:
+            To ensure MemoryDB clusters have encryption in transit (TLS) enabled using the AWS CLI. **Note:** TLS is fixed at cluster creation and cannot be enabled on an existing cluster, so remediation means creating a new TLS-enabled cluster, migrating data, repointing applications, and deleting the old cluster. Create a new MemoryDB cluster with TLS enabled:
 
             ```bash
             aws memorydb create-cluster \
@@ -31009,7 +31078,7 @@ queries:
             ```
         - id: terraform
           desc: |
-            To ensure MemoryDB clusters have encryption in transit (TLS) enabled in Terraform, enable TLS on a MemoryDB cluster:
+            To ensure MemoryDB clusters have encryption in transit (TLS) enabled in Terraform. **Note:** TLS is fixed at cluster creation; applying this to an existing cluster forces a replacement, so plan to migrate data and delete the old cluster rather than leaving it running. Enable TLS on a MemoryDB cluster:
 
             ```hcl
             resource "aws_memorydb_cluster" "example" {
@@ -32369,7 +32438,7 @@ queries:
             To ensure all future workspaces are encrypted, configure encryption in the directory default creation properties.
         - id: cli
           desc: |
-            To ensure WorkSpaces instances have root and user volume encryption enabled using the AWS CLI, create an encrypted workspace:
+            To ensure WorkSpaces instances have root and user volume encryption enabled using the AWS CLI. **Note:** volume encryption is fixed when the workspace is created and cannot be enabled on an existing workspace, so remediation means launching a new encrypted workspace for the user, migrating data, and terminating the old one. Create an encrypted workspace:
 
             ```bash
             aws workspaces create-workspaces --workspaces '[{
@@ -32390,7 +32459,7 @@ queries:
             ```
         - id: terraform
           desc: |
-            To ensure WorkSpaces instances have root and user volume encryption enabled in Terraform, enable volume encryption on a workspace:
+            To ensure WorkSpaces instances have root and user volume encryption enabled in Terraform. **Note:** volume encryption is fixed at workspace creation; applying this to an existing workspace forces a replacement, so migrate user data and terminate the old workspace rather than leaving it running. Enable volume encryption on a workspace:
 
             ```hcl
             resource "aws_workspaces_workspace" "example" {
@@ -37661,7 +37730,7 @@ queries:
             5. Delete the unencrypted domain once migration is complete.
         - id: cli
           desc: |
-            To ensure SageMaker domains are encrypted with a KMS key using the AWS CLI, create a SageMaker domain with KMS encryption:
+            To ensure SageMaker domains are encrypted with a KMS key using the AWS CLI. **Note:** the encryption key is fixed at domain creation and cannot be changed on an existing domain, so remediating an unencrypted domain means creating a new encrypted domain, migrating users and data, and deleting the old one. Create a SageMaker domain with KMS encryption:
 
             ```bash
             aws sagemaker create-domain \
@@ -37674,7 +37743,7 @@ queries:
             ```
         - id: terraform
           desc: |
-            To ensure SageMaker domains are encrypted with a KMS key in Terraform, ensure SageMaker domains are encrypted with a KMS key:
+            To ensure SageMaker domains are encrypted with a KMS key in Terraform. **Note:** the encryption key is fixed at domain creation; applying this to an existing unencrypted domain forces a replacement, so migrate users and data and delete the old domain rather than leaving it running:
 
             ```hcl
             resource "aws_kms_key" "sagemaker_domain" {
@@ -44853,11 +44922,11 @@ queries:
           mondoo.com/filter-icon: cloudformation
     docs:
       desc: |
-        This check ensures that Amazon Elasticsearch Service domains are configured to require HTTPS for all traffic. When HTTPS is not enforced, communication between clients and the Elasticsearch domain occurs over plaintext HTTP, exposing query data and results to network-level interception.
+        This check ensures that Amazon OpenSearch Service domains are configured to require HTTPS for all traffic. When HTTPS is not enforced, communication between clients and the domain occurs over plaintext HTTP, exposing query data and results to network-level interception.
 
         **Why this matters**
 
-        - Elasticsearch domains often contain sensitive data such as application logs, user activity, and business analytics. Plaintext HTTP exposes this data to eavesdropping on the network path.
+        - OpenSearch domains often contain sensitive data such as application logs, user activity, and business analytics. Plaintext HTTP exposes this data to eavesdropping on the network path.
         - Without HTTPS enforcement, clients may unknowingly connect over HTTP, transmitting credentials and query payloads in the clear.
         - Enforcing HTTPS ensures all client-to-domain communication is encrypted with TLS, protecting data confidentiality and integrity in transit.
 
@@ -44869,9 +44938,9 @@ queries:
       audit: |
         ### Audit via Console
 
-        1. Sign in to the AWS Management Console and navigate to **Amazon Elasticsearch Service** (or **Amazon OpenSearch Service**).
+        1. Sign in to the AWS Management Console and navigate to **Amazon OpenSearch Service**.
         2. Choose **Domains** in the left navigation and select the domain to review.
-        3. Choose the **Security configuration** tab (or **Actions** > **Edit security configuration**).
+        3. Choose the **Security configuration** tab, or **Actions** then **Edit security configuration**.
         4. Under **HTTPS**, verify that **Require HTTPS for all traffic to the domain** is enabled.
 
         A passing domain shows HTTPS enforcement as **Enabled**. A failing domain shows it as **Disabled** or not configured.
@@ -44890,16 +44959,16 @@ queries:
       remediation:
         - id: console
           desc: |
-            To ensure Elasticsearch domains enforce HTTPS using the AWS Console:
+            To ensure OpenSearch domains enforce HTTPS using the AWS Console:
 
-            1. Navigate to the **Amazon Elasticsearch Service Console** and select **Domains**.
+            1. Navigate to the **Amazon OpenSearch Service Console** and select **Domains**.
             2. Select the domain you want to configure.
-            3. Choose **Edit domain** or **Actions** > **Edit security configuration**.
+            3. Choose **Edit domain**, or **Actions** then **Edit security configuration**.
             4. Under **Domain access policy** or **HTTPS**, enable **Require HTTPS for all traffic to the domain**.
             5. Choose **Save changes**.
         - id: cli
           desc: |
-            To ensure Elasticsearch domains enforce HTTPS using the AWS CLI, update the domain to enforce HTTPS:
+            To ensure OpenSearch domains enforce HTTPS using the AWS CLI, update the domain to enforce HTTPS:
 
             ```bash
             aws es update-elasticsearch-domain-config \
@@ -44916,12 +44985,12 @@ queries:
             ```
         - id: terraform
           desc: |
-            To ensure Elasticsearch domains enforce HTTPS in Terraform:
+            To ensure OpenSearch domains enforce HTTPS in Terraform:
 
             ```hcl
-            resource "aws_elasticsearch_domain" "example" {
-              domain_name           = "example-domain"
-              elasticsearch_version = "7.10"
+            resource "aws_opensearch_domain" "example" {
+              domain_name    = "example-domain"
+              engine_version = "OpenSearch_2.11"
 
               domain_endpoint_options {
                 enforce_https = true
@@ -44930,15 +44999,15 @@ queries:
             ```
         - id: cloudformation
           desc: |
-            To ensure Elasticsearch domains enforce HTTPS in CloudFormation:
+            To ensure OpenSearch domains enforce HTTPS in CloudFormation:
 
             ```yaml
             Resources:
               ElasticsearchDomain:
-                Type: AWS::Elasticsearch::Domain
+                Type: AWS::OpenSearchService::Domain
                 Properties:
                   DomainName: example-domain
-                  ElasticsearchVersion: "7.10"
+                  EngineVersion: "OpenSearch_2.11"
                   DomainEndpointOptions:
                     EnforceHTTPS: true
             ```
@@ -45017,7 +45086,7 @@ queries:
           mondoo.com/filter-icon: cloudformation
     docs:
       desc: |
-        This check ensures that Amazon Elasticsearch Service domains are configured with a TLS security policy that enforces TLS 1.2 or higher. Older TLS versions (1.0 and 1.1) have known vulnerabilities and should not be used for production workloads.
+        This check ensures that Amazon OpenSearch Service domains are configured with a TLS security policy that enforces TLS 1.2 or higher. Older TLS versions such as 1.0 and 1.1 have known vulnerabilities and should not be used for production workloads.
 
         **Why this matters**
 
@@ -45033,9 +45102,9 @@ queries:
       audit: |
         ### Audit via Console
 
-        1. Sign in to the AWS Management Console and navigate to **Amazon Elasticsearch Service** (or **Amazon OpenSearch Service**).
+        1. Sign in to the AWS Management Console and navigate to **Amazon OpenSearch Service**.
         2. Choose **Domains** in the left navigation and select the domain to review.
-        3. Choose the **Security configuration** tab (or **Actions** > **Edit security configuration**).
+        3. Choose the **Security configuration** tab, or **Actions** then **Edit security configuration**.
         4. Under **HTTPS**, verify that the **TLS security policy** is set to **Policy-Min-TLS-1-2-2019-07** or **Policy-Min-TLS-1-2-PFS-2023-10**.
 
         A passing domain shows a TLS policy of `Policy-Min-TLS-1-2-2019-07` or stronger. A failing domain shows `Policy-Min-TLS-1-0-2020-07` or a weaker policy.
@@ -45054,16 +45123,16 @@ queries:
       remediation:
         - id: console
           desc: |
-            To ensure Elasticsearch domains use TLS 1.2 or higher using the AWS Console:
+            To ensure OpenSearch domains use TLS 1.2 or higher using the AWS Console:
 
-            1. Navigate to the **Amazon Elasticsearch Service Console** and select **Domains**.
+            1. Navigate to the **Amazon OpenSearch Service Console** and select **Domains**.
             2. Select the domain you want to configure.
-            3. Choose **Edit domain** or **Actions** > **Edit security configuration**.
+            3. Choose **Edit domain**, or **Actions** then **Edit security configuration**.
             4. Under **HTTPS**, set the **TLS security policy** to **Policy-Min-TLS-1-2-2019-07** or higher.
             5. Choose **Save changes**.
         - id: cli
           desc: |
-            To ensure Elasticsearch domains use TLS 1.2 or higher using the AWS CLI, update the domain to enforce TLS 1.2:
+            To ensure OpenSearch domains use TLS 1.2 or higher using the AWS CLI, update the domain to enforce TLS 1.2:
 
             ```bash
             aws es update-elasticsearch-domain-config \
@@ -45080,12 +45149,12 @@ queries:
             ```
         - id: terraform
           desc: |
-            To ensure Elasticsearch domains use TLS 1.2 or higher in Terraform:
+            To ensure OpenSearch domains use TLS 1.2 or higher in Terraform:
 
             ```hcl
-            resource "aws_elasticsearch_domain" "example" {
-              domain_name           = "example-domain"
-              elasticsearch_version = "7.10"
+            resource "aws_opensearch_domain" "example" {
+              domain_name    = "example-domain"
+              engine_version = "OpenSearch_2.11"
 
               domain_endpoint_options {
                 enforce_https       = true
@@ -45095,15 +45164,15 @@ queries:
             ```
         - id: cloudformation
           desc: |
-            To ensure Elasticsearch domains use TLS 1.2 or higher in CloudFormation:
+            To ensure OpenSearch domains use TLS 1.2 or higher in CloudFormation:
 
             ```yaml
             Resources:
               ElasticsearchDomain:
-                Type: AWS::Elasticsearch::Domain
+                Type: AWS::OpenSearchService::Domain
                 Properties:
                   DomainName: example-domain
-                  ElasticsearchVersion: "7.10"
+                  EngineVersion: "OpenSearch_2.11"
                   DomainEndpointOptions:
                     EnforceHTTPS: true
                     TLSSecurityPolicy: Policy-Min-TLS-1-2-2019-07
@@ -45183,7 +45252,7 @@ queries:
           mondoo.com/filter-icon: cloudformation
     docs:
       desc: |
-        This check ensures that Amazon Elasticsearch Service domains have audit logging enabled. Audit logs capture authentication attempts, access to indices, and query activity, providing visibility into who is accessing your Elasticsearch data and what operations they perform.
+        This check ensures that Amazon OpenSearch Service domains have audit logging enabled. Audit logs capture authentication attempts, access to indices, and query activity, providing visibility into who is accessing your data and what operations they perform.
 
         **Why this matters**
 
@@ -45199,7 +45268,7 @@ queries:
       audit: |
         ### Audit via Console
 
-        1. Sign in to the AWS Management Console and navigate to **Amazon Elasticsearch Service** (or **Amazon OpenSearch Service**).
+        1. Sign in to the AWS Management Console and navigate to **Amazon OpenSearch Service**.
         2. Choose **Domains** in the left navigation and select the domain to review.
         3. Choose the **Logs** tab.
         4. Under **Audit logs**, verify that logging is **Enabled** and a CloudWatch Logs log group is configured.
@@ -45220,9 +45289,9 @@ queries:
       remediation:
         - id: console
           desc: |
-            To ensure Elasticsearch domains have audit logging enabled using the AWS Console:
+            To ensure OpenSearch domains have audit logging enabled using the AWS Console:
 
-            1. Navigate to the **Amazon Elasticsearch Service Console** and select **Domains**.
+            1. Navigate to the **Amazon OpenSearch Service Console** and select **Domains**.
             2. Select the domain you want to configure.
             3. Choose the **Logs** tab.
             4. Under **Audit logs**, choose **Enable** and select a CloudWatch Logs log group.
@@ -45231,7 +45300,7 @@ queries:
             Note: Audit logging requires fine-grained access control to be enabled on the domain.
         - id: cli
           desc: |
-            To ensure Elasticsearch domains have audit logging enabled using the AWS CLI, enable audit logging by updating the log publishing options:
+            To ensure OpenSearch domains have audit logging enabled using the AWS CLI, enable audit logging by updating the log publishing options. Audit logging requires fine-grained access control to be enabled on the domain:
 
             ```bash
             aws es update-elasticsearch-domain-config \
@@ -45248,12 +45317,12 @@ queries:
             ```
         - id: terraform
           desc: |
-            To ensure Elasticsearch domains have audit logging enabled in Terraform:
+            To ensure OpenSearch domains have audit logging enabled in Terraform. Audit logging requires fine-grained access control to be enabled on the domain, otherwise the apply fails at the API:
 
             ```hcl
-            resource "aws_elasticsearch_domain" "example" {
-              domain_name           = "example-domain"
-              elasticsearch_version = "7.10"
+            resource "aws_opensearch_domain" "example" {
+              domain_name    = "example-domain"
+              engine_version = "OpenSearch_2.11"
 
               log_publishing_options {
                 log_type                 = "AUDIT_LOGS"
@@ -45263,15 +45332,15 @@ queries:
             ```
         - id: cloudformation
           desc: |
-            To ensure Elasticsearch domains have audit logging enabled in CloudFormation:
+            To ensure OpenSearch domains have audit logging enabled in CloudFormation. Audit logging requires fine-grained access control to be enabled on the domain, otherwise the stack fails at the API:
 
             ```yaml
             Resources:
               ElasticsearchDomain:
-                Type: AWS::Elasticsearch::Domain
+                Type: AWS::OpenSearchService::Domain
                 Properties:
                   DomainName: example-domain
-                  ElasticsearchVersion: "7.10"
+                  EngineVersion: "OpenSearch_2.11"
                   LogPublishingOptions:
                     AUDIT_LOGS:
                       CloudWatchLogsLogGroupArn: !GetAtt AuditLogGroup.Arn
@@ -46016,7 +46085,7 @@ queries:
             6. Delete the unencrypted cluster once migration is complete.
         - id: cli
           desc: |
-            To ensure DynamoDB DAX clusters have encryption at rest using the AWS CLI, create a DAX cluster with encryption at rest enabled:
+            To ensure DynamoDB DAX clusters have encryption at rest using the AWS CLI. **Note:** encryption at rest is fixed at cluster creation and cannot be enabled on an existing cluster, so remediation means creating a new encrypted cluster, repointing the application, and deleting the old cluster. Create a DAX cluster with encryption at rest enabled:
 
             ```bash
             aws dax create-cluster \
@@ -46035,7 +46104,7 @@ queries:
             ```
         - id: terraform
           desc: |
-            To ensure DynamoDB DAX clusters have encryption at rest in Terraform:
+            To ensure DynamoDB DAX clusters have encryption at rest in Terraform. **Note:** encryption at rest is fixed at cluster creation; applying this to an existing cluster forces a replacement, so repoint the application and delete the old cluster rather than leaving it running:
 
             ```hcl
             resource "aws_dax_cluster" "example" {
@@ -47714,7 +47783,7 @@ queries:
               engine              = "aurora-mysql"
               engine_version      = "8.0.mysql_aurora.3.04.0"
               master_username     = "admin"
-              master_password     = "changeme"
+              master_password     = var.master_password
               deletion_protection = true
             }
             ```
@@ -47731,7 +47800,7 @@ queries:
                   Engine: aurora-mysql
                   EngineVersion: 8.0.mysql_aurora.3.04.0
                   MasterUsername: admin
-                  MasterUserPassword: changeme
+                  MasterUserPassword: !Ref DBPassword
                   DeletionProtection: true
             ```
     refs:
@@ -47852,7 +47921,7 @@ queries:
             8. Migrate images from the old repository to the new KMS-encrypted repository.
         - id: cli
           desc: |
-            To ensure ECR repositories use KMS encryption using the AWS CLI, create an ECR repository with KMS encryption:
+            To ensure ECR repositories use KMS encryption using the AWS CLI. **Note:** the encryption type is fixed at repository creation and cannot be changed, so remediation means creating a new KMS-encrypted repository, re-pushing or copying images to it, and deleting the old repository. Create an ECR repository with KMS encryption:
 
             ```bash
             aws ecr create-repository \
@@ -47868,7 +47937,7 @@ queries:
             ```
         - id: terraform
           desc: |
-            To ensure ECR repositories use KMS encryption in Terraform, configure an ECR repository with KMS encryption:
+            To ensure ECR repositories use KMS encryption in Terraform. **Note:** the encryption type is fixed at repository creation; applying this to an existing repository forces a replacement, so re-push or copy images to the new repository and delete the old one rather than leaving it in place. Configure an ECR repository with KMS encryption:
 
             ```hcl
             resource "aws_ecr_repository" "example" {
@@ -48224,7 +48293,7 @@ queries:
               cluster_identifier              = "example-docdb"
               engine                          = "docdb"
               master_username                 = "admin"
-              master_password                 = "changeme"
+              master_password                 = var.master_password
               enabled_cloudwatch_logs_exports = ["audit"]
             }
             ```
@@ -48239,7 +48308,7 @@ queries:
                 Properties:
                   DBClusterIdentifier: example-docdb
                   MasterUsername: admin
-                  MasterUserPassword: changeme
+                  MasterUserPassword: !Ref DBPassword
                   EnableCloudwatchLogsExports:
                     - audit
             ```
@@ -50188,7 +50257,7 @@ queries:
               cluster_identifier = "example"
               engine             = "aurora-mysql"
               master_username    = "admin"
-              master_password    = "changeme"
+              master_password    = var.master_password
 
               storage_encrypted = true
               kms_key_id        = aws_kms_key.rds.arn
@@ -50206,7 +50275,7 @@ queries:
                   DBClusterIdentifier: example
                   Engine: aurora-mysql
                   MasterUsername: admin
-                  MasterUserPassword: changeme
+                  MasterUserPassword: !Ref DBPassword
                   StorageEncrypted: true
                   KmsKeyId: !Ref MyKmsKey
             ```
@@ -51070,7 +51139,7 @@ queries:
               cluster_identifier = "example"
               engine             = "docdb"
               master_username    = "admin"
-              master_password    = "changeme"
+              master_password    = var.master_password
 
               vpc_security_group_ids = [aws_security_group.docdb.id]
             }
@@ -56178,7 +56247,7 @@ queries:
             7. Migrate users and workflows from the old server, then delete it.
         - id: cli
           desc: |
-            To ensure Transfer Family servers use VPC endpoints using the AWS CLI, create a new server with VPC endpoint type:
+            To ensure Transfer Family servers use VPC endpoints using the AWS CLI. **Note:** the endpoint type is fixed at server creation and cannot be changed, so remediation means creating a new VPC-endpoint server, migrating users and workflows, and deleting the old server. Create a new server with VPC endpoint type:
 
             ```bash
             aws transfer create-server \
@@ -56188,7 +56257,7 @@ queries:
             ```
         - id: terraform
           desc: |
-            To ensure Transfer Family servers use VPC endpoints in Terraform:
+            To ensure Transfer Family servers use VPC endpoints in Terraform. **Note:** the endpoint type is fixed at server creation; applying this to an existing server forces a replacement, so migrate users and workflows and delete the old server rather than leaving it running:
 
             ```hcl
             resource "aws_transfer_server" "example" {
@@ -56656,7 +56725,7 @@ queries:
             6. Migrate users from the old server and delete it.
         - id: cli
           desc: |
-            To ensure Transfer Family servers use external identity providers using the AWS CLI, create a new server with a custom identity provider:
+            To ensure Transfer Family servers use external identity providers using the AWS CLI. **Note:** the identity provider type is fixed at server creation and cannot be changed, so remediation means creating a new server, migrating users, and deleting the old server. Create a new server with a custom identity provider:
 
             ```bash
             aws transfer create-server \
@@ -56666,7 +56735,7 @@ queries:
             ```
         - id: terraform
           desc: |
-            To ensure Transfer Family servers use external identity providers in Terraform:
+            To ensure Transfer Family servers use external identity providers in Terraform. **Note:** the identity provider type is fixed at server creation; applying this to an existing server forces a replacement, so migrate users and delete the old server rather than leaving it running:
 
             ```hcl
             resource "aws_transfer_server" "example" {
@@ -59783,13 +59852,22 @@ queries:
         A passing security group returns no results in the query output. A failing security group appears in the results with its `GroupId` listed.
 
       remediation:
+        - id: console
+          desc: |
+            1. Open the EC2 console and select **Security Groups**.
+            2. Identify any rule allowing port 1521 from `0.0.0.0/0` or `::/0`.
+            3. Edit the rule and replace the source with the application-tier security group, VPN CIDR, or specific bastion address.
         - id: cli
           desc: |
+            Revoke the unrestricted rule:
+
             ```bash
             aws ec2 revoke-security-group-ingress \
               --group-id <sg-id> \
               --ip-permissions IpProtocol=tcp,FromPort=1521,ToPort=1521,IpRanges='[{CidrIp=0.0.0.0/0}]'
             ```
+
+            Run a second `revoke-security-group-ingress` for the IPv6 rule, replacing `IpRanges` with `Ipv6Ranges='[{CidrIpv6=::/0}]'`, since the check also fails on an open `::/0` source.
         - id: terraform
           desc: |
             Replace any `0.0.0.0/0` or `::/0` source on port 1521 with the application-tier security group, VPN CIDR, or specific bastion address. The example shows the modern `aws_vpc_security_group_ingress_rule` form; the same rule applies to inline `ingress` blocks on `aws_security_group`:
@@ -59946,13 +60024,22 @@ queries:
         A passing security group returns no results in the query output. A failing security group appears in the results with its `GroupId` listed.
 
       remediation:
+        - id: console
+          desc: |
+            1. Open the EC2 console and select **Security Groups**.
+            2. Identify any rule allowing port 27017 from `0.0.0.0/0` or `::/0`.
+            3. Edit the rule and replace the source with the application-tier security group, VPN CIDR, or specific bastion address.
         - id: cli
           desc: |
+            Revoke the unrestricted rule:
+
             ```bash
             aws ec2 revoke-security-group-ingress \
               --group-id <sg-id> \
               --ip-permissions IpProtocol=tcp,FromPort=27017,ToPort=27017,IpRanges='[{CidrIp=0.0.0.0/0}]'
             ```
+
+            Run a second `revoke-security-group-ingress` for the IPv6 rule, replacing `IpRanges` with `Ipv6Ranges='[{CidrIpv6=::/0}]'`, since the check also fails on an open `::/0` source.
         - id: terraform
           desc: |
             Replace any `0.0.0.0/0` or `::/0` source on port 27017 with the application-tier security group, VPN CIDR, or specific bastion address. The example shows the modern `aws_vpc_security_group_ingress_rule` form; the same rule applies to inline `ingress` blocks on `aws_security_group`:
@@ -60109,13 +60196,22 @@ queries:
         A passing security group returns no results in the query output. A failing security group appears in the results with its `GroupId` listed.
 
       remediation:
+        - id: console
+          desc: |
+            1. Open the EC2 console and select **Security Groups**.
+            2. Identify any rule allowing port 6379 from `0.0.0.0/0` or `::/0`.
+            3. Edit the rule and replace the source with the application-tier security group, VPN CIDR, or specific bastion address.
         - id: cli
           desc: |
+            Revoke the unrestricted rule:
+
             ```bash
             aws ec2 revoke-security-group-ingress \
               --group-id <sg-id> \
               --ip-permissions IpProtocol=tcp,FromPort=6379,ToPort=6379,IpRanges='[{CidrIp=0.0.0.0/0}]'
             ```
+
+            Run a second `revoke-security-group-ingress` for the IPv6 rule, replacing `IpRanges` with `Ipv6Ranges='[{CidrIpv6=::/0}]'`, since the check also fails on an open `::/0` source.
         - id: terraform
           desc: |
             Replace any `0.0.0.0/0` or `::/0` source on port 6379 with the application-tier security group, VPN CIDR, or specific bastion address. The example shows the modern `aws_vpc_security_group_ingress_rule` form; the same rule applies to inline `ingress` blocks on `aws_security_group`:
@@ -60272,8 +60368,15 @@ queries:
         A passing security group returns no results in the query output. A failing security group appears in the results with its `GroupId` listed.
 
       remediation:
+        - id: console
+          desc: |
+            1. Open the EC2 console and select **Security Groups**.
+            2. Identify any rule allowing port 11211 from `0.0.0.0/0` or `::/0`.
+            3. Edit the rule and replace the source with the application-tier security group, VPN CIDR, or specific bastion address.
         - id: cli
           desc: |
+            Revoke the unrestricted rules for both TCP and UDP:
+
             ```bash
             aws ec2 revoke-security-group-ingress \
               --group-id <sg-id> \
@@ -60283,6 +60386,8 @@ queries:
               --group-id <sg-id> \
               --ip-permissions IpProtocol=udp,FromPort=11211,ToPort=11211,IpRanges='[{CidrIp=0.0.0.0/0}]'
             ```
+
+            Run the same revokes again for the IPv6 rules, replacing `IpRanges` with `Ipv6Ranges='[{CidrIpv6=::/0}]'`, since the check also fails on an open `::/0` source.
         - id: terraform
           desc: |
             Replace any `0.0.0.0/0` or `::/0` source on port 11211 with the application-tier security group, VPN CIDR, or specific bastion address. The example shows the modern `aws_vpc_security_group_ingress_rule` form; the same rule applies to inline `ingress` blocks on `aws_security_group`:
@@ -60439,13 +60544,22 @@ queries:
         A passing security group returns no results in the query output. A failing security group appears in the results with its `GroupId` listed.
 
       remediation:
+        - id: console
+          desc: |
+            1. Open the EC2 console and select **Security Groups**.
+            2. Identify any rule allowing port 9200-9300 from `0.0.0.0/0` or `::/0`.
+            3. Edit the rule and replace the source with the application-tier security group, VPN CIDR, or specific bastion address.
         - id: cli
           desc: |
+            Revoke the unrestricted rule:
+
             ```bash
             aws ec2 revoke-security-group-ingress \
               --group-id <sg-id> \
               --ip-permissions IpProtocol=tcp,FromPort=9200,ToPort=9300,IpRanges='[{CidrIp=0.0.0.0/0}]'
             ```
+
+            Run a second `revoke-security-group-ingress` for the IPv6 rule, replacing `IpRanges` with `Ipv6Ranges='[{CidrIpv6=::/0}]'`, since the check also fails on an open `::/0` source.
         - id: terraform
           desc: |
             Replace any `0.0.0.0/0` or `::/0` source on ports 9200-9300 with the application-tier security group, VPN CIDR, or specific bastion address. The example shows the modern `aws_vpc_security_group_ingress_rule` form; the same rule applies to inline `ingress` blocks on `aws_security_group`:
@@ -60602,13 +60716,22 @@ queries:
         A passing security group returns no results in the query output. A failing security group appears in the results with its `GroupId` listed.
 
       remediation:
+        - id: console
+          desc: |
+            1. Open the EC2 console and select **Security Groups**.
+            2. Identify any rule allowing port 5985-5986 from `0.0.0.0/0` or `::/0`.
+            3. Edit the rule and replace the source with the application-tier security group, VPN CIDR, or specific bastion address.
         - id: cli
           desc: |
+            Revoke the unrestricted rule:
+
             ```bash
             aws ec2 revoke-security-group-ingress \
               --group-id <sg-id> \
               --ip-permissions IpProtocol=tcp,FromPort=5985,ToPort=5986,IpRanges='[{CidrIp=0.0.0.0/0}]'
             ```
+
+            Run a second `revoke-security-group-ingress` for the IPv6 rule, replacing `IpRanges` with `Ipv6Ranges='[{CidrIpv6=::/0}]'`, since the check also fails on an open `::/0` source.
         - id: terraform
           desc: |
             Replace any `0.0.0.0/0` or `::/0` source on ports 5985-5986 with the application-tier security group, VPN CIDR, or specific bastion address. The example shows the modern `aws_vpc_security_group_ingress_rule` form; the same rule applies to inline `ingress` blocks on `aws_security_group`:
@@ -60765,13 +60888,22 @@ queries:
         A passing security group returns no results in the query output. A failing security group appears in the results with its `GroupId` listed.
 
       remediation:
+        - id: console
+          desc: |
+            1. Open the EC2 console and select **Security Groups**.
+            2. Identify any rule allowing port 2375-2376 from `0.0.0.0/0` or `::/0`.
+            3. Edit the rule and replace the source with the application-tier security group, VPN CIDR, or specific bastion address.
         - id: cli
           desc: |
+            Revoke the unrestricted rule:
+
             ```bash
             aws ec2 revoke-security-group-ingress \
               --group-id <sg-id> \
               --ip-permissions IpProtocol=tcp,FromPort=2375,ToPort=2376,IpRanges='[{CidrIp=0.0.0.0/0}]'
             ```
+
+            Run a second `revoke-security-group-ingress` for the IPv6 rule, replacing `IpRanges` with `Ipv6Ranges='[{CidrIpv6=::/0}]'`, since the check also fails on an open `::/0` source.
 
             Prefer disabling the daemon's TCP socket entirely and using SSH-based contexts instead.
         - id: terraform
@@ -60930,13 +61062,22 @@ queries:
         A passing security group returns no results in the query output. A failing security group appears in the results with its `GroupId` listed.
 
       remediation:
+        - id: console
+          desc: |
+            1. Open the EC2 console and select **Security Groups**.
+            2. Identify any rule allowing port 6443 from `0.0.0.0/0` or `::/0`.
+            3. Edit the rule and replace the source with the application-tier security group, VPN CIDR, or specific bastion address.
         - id: cli
           desc: |
+            Revoke the unrestricted rule:
+
             ```bash
             aws ec2 revoke-security-group-ingress \
               --group-id <sg-id> \
               --ip-permissions IpProtocol=tcp,FromPort=6443,ToPort=6443,IpRanges='[{CidrIp=0.0.0.0/0}]'
             ```
+
+            Run a second `revoke-security-group-ingress` for the IPv6 rule, replacing `IpRanges` with `Ipv6Ranges='[{CidrIpv6=::/0}]'`, since the check also fails on an open `::/0` source.
 
             For EKS, prefer setting cluster endpoint access to **Private** or restrict the public endpoint to an explicit allowlist via `aws eks update-cluster-config --resources-vpc-config endpointPublicAccess=true,publicAccessCidrs=...`.
         - id: terraform
@@ -61094,13 +61235,22 @@ queries:
         A passing security group returns no results in the query output. A failing security group appears in the results with its `GroupId` listed.
 
       remediation:
+        - id: console
+          desc: |
+            1. Open the EC2 console and select **Security Groups**.
+            2. Identify any rule allowing port 10250-10255 from `0.0.0.0/0` or `::/0`.
+            3. Edit the rule and replace the source with the application-tier security group, VPN CIDR, or specific bastion address.
         - id: cli
           desc: |
+            Revoke the unrestricted rule:
+
             ```bash
             aws ec2 revoke-security-group-ingress \
               --group-id <sg-id> \
               --ip-permissions IpProtocol=tcp,FromPort=10250,ToPort=10255,IpRanges='[{CidrIp=0.0.0.0/0}]'
             ```
+
+            Run a second `revoke-security-group-ingress` for the IPv6 rule, replacing `IpRanges` with `Ipv6Ranges='[{CidrIpv6=::/0}]'`, since the check also fails on an open `::/0` source.
         - id: terraform
           desc: |
             Replace any `0.0.0.0/0` or `::/0` source on ports 10250-10255 with the application-tier security group, VPN CIDR, or specific bastion address. The example shows the modern `aws_vpc_security_group_ingress_rule` form; the same rule applies to inline `ingress` blocks on `aws_security_group`:
@@ -61255,13 +61405,22 @@ queries:
         A passing security group returns no results in the query output. A failing security group appears in the results with its `GroupId` listed.
 
       remediation:
+        - id: console
+          desc: |
+            1. Open the EC2 console and select **Security Groups**.
+            2. Identify any rule allowing port 2379-2380 from `0.0.0.0/0` or `::/0`.
+            3. Edit the rule and replace the source with the application-tier security group, VPN CIDR, or specific bastion address.
         - id: cli
           desc: |
+            Revoke the unrestricted rule:
+
             ```bash
             aws ec2 revoke-security-group-ingress \
               --group-id <sg-id> \
               --ip-permissions IpProtocol=tcp,FromPort=2379,ToPort=2380,IpRanges='[{CidrIp=0.0.0.0/0}]'
             ```
+
+            Run a second `revoke-security-group-ingress` for the IPv6 rule, replacing `IpRanges` with `Ipv6Ranges='[{CidrIpv6=::/0}]'`, since the check also fails on an open `::/0` source.
         - id: terraform
           desc: |
             Replace any `0.0.0.0/0` or `::/0` source on ports 2379-2380 with the application-tier security group, VPN CIDR, or specific bastion address. The example shows the modern `aws_vpc_security_group_ingress_rule` form; the same rule applies to inline `ingress` blocks on `aws_security_group`:
@@ -63687,7 +63846,7 @@ queries:
             4. Once the new model is trained and validated, delete the prior custom model.
         - id: cli
           desc: |
-            To create a Bedrock custom model encrypted with a CMK using the AWS CLI:
+            To create a Bedrock custom model encrypted with a CMK using the AWS CLI. **Note:** custom-model encryption is set at creation and cannot be modified, so remediating an existing model means rerunning the customization job with a CMK and deleting the prior model once the new one is validated:
 
             ```bash
             aws bedrock create-model-customization-job \
@@ -63701,7 +63860,7 @@ queries:
             ```
         - id: terraform
           desc: |
-            To create a Bedrock custom model encrypted with a customer-managed KMS key in Terraform, set `custom_model_kms_key_id` on the `aws_bedrock_custom_model` resource:
+            To create a Bedrock custom model encrypted with a customer-managed KMS key in Terraform, set `custom_model_kms_key_id` on the `aws_bedrock_custom_model` resource. **Note:** custom-model encryption is set at creation; applying this to an existing model forces a replacement, so validate the new model and delete the prior one rather than leaving it in place:
 
             ```hcl
             resource "aws_bedrock_custom_model" "example" {

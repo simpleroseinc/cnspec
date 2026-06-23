@@ -3,7 +3,7 @@
 policies:
   - uid: mondoo-digitalocean-security
     name: Mondoo DigitalOcean Security
-    version: 1.4.1
+    version: 2.2.0
     license: BUSL-1.1
     tags:
       mondoo.com/category: security
@@ -44,32 +44,37 @@ policies:
         checks:
           - uid: mondoo-digitalocean-security-droplet-in-vpc
           - uid: mondoo-digitalocean-security-droplet-firewall-coverage
+          - uid: mondoo-digitalocean-security-droplet-not-internet-reachable
       - title: Cloud Firewalls
-        filters: asset.platform == "digitalocean"
+        filters: asset.platform == "digitalocean-firewall"
         checks:
           - uid: mondoo-digitalocean-security-firewall-no-unrestricted-ssh
           - uid: mondoo-digitalocean-security-firewall-no-unrestricted-rdp
           - uid: mondoo-digitalocean-security-firewall-no-unrestricted-db-ports
           - uid: mondoo-digitalocean-security-firewall-no-all-ports-open
       - title: Managed Databases
-        filters: asset.platform == "digitalocean"
+        filters: asset.platform == "digitalocean-database"
         checks:
           - uid: mondoo-digitalocean-security-db-firewall-configured
           - uid: mondoo-digitalocean-security-db-in-private-network
+          - uid: mondoo-digitalocean-security-db-not-internet-reachable
           - uid: mondoo-digitalocean-security-db-engine-supported-version
           - uid: mondoo-digitalocean-security-db-ca-certificate-not-expired
       - title: Load Balancers
-        filters: asset.platform == "digitalocean"
+        filters: asset.platform == "digitalocean-loadbalancer"
         checks:
           - uid: mondoo-digitalocean-security-lb-http-redirected-to-https
+          - uid: mondoo-digitalocean-security-lb-strong-tls-cipher-policy
           - uid: mondoo-digitalocean-security-lb-in-vpc
       - title: Kubernetes (DOKS)
-        filters: asset.platform == "digitalocean"
+        filters: asset.platform == "digitalocean-kubernetes-cluster"
         checks:
           - uid: mondoo-digitalocean-security-doks-auto-upgrade-enabled
           - uid: mondoo-digitalocean-security-doks-supported-version
           - uid: mondoo-digitalocean-security-doks-sso-enabled
           - uid: mondoo-digitalocean-security-doks-sso-required
+          - uid: mondoo-digitalocean-security-doks-in-vpc
+          - uid: mondoo-digitalocean-security-doks-control-plane-firewall-enabled
       - title: TLS Certificates
         filters: asset.platform == "digitalocean"
         checks:
@@ -78,14 +83,21 @@ policies:
         filters: asset.platform == "digitalocean"
         checks:
           - uid: mondoo-digitalocean-security-cdn-has-certificate
-      - title: Spaces
+      - title: Spaces Access Keys
         filters: asset.platform == "digitalocean"
         checks:
           - uid: mondoo-digitalocean-security-spaces-key-has-scoped-grants
+      - title: Spaces Buckets
+        filters: asset.platform == "digitalocean-spaces-bucket"
+        checks:
           - uid: mondoo-digitalocean-security-spaces-bucket-not-publicly-readable
           - uid: mondoo-digitalocean-security-spaces-bucket-not-publicly-writable
+          - uid: mondoo-digitalocean-security-spaces-bucket-not-authenticated-readable
+          - uid: mondoo-digitalocean-security-spaces-bucket-policy-not-public
           - uid: mondoo-digitalocean-security-spaces-bucket-encryption-enabled
           - uid: mondoo-digitalocean-security-spaces-bucket-versioning-enabled
+          - uid: mondoo-digitalocean-security-spaces-bucket-mfa-delete-enabled
+          - uid: mondoo-digitalocean-security-spaces-bucket-cors-no-wildcard-origin
       - title: App Platform
         filters: asset.platform == "digitalocean"
         checks:
@@ -98,6 +110,7 @@ policies:
         filters: asset.platform == "digitalocean"
         checks:
           - uid: mondoo-digitalocean-security-gradientai-agent-not-publicly-deployed
+          - uid: mondoo-digitalocean-security-gradientai-agent-has-guardrails
           - uid: mondoo-digitalocean-security-gradientai-knowledge-base-not-public
     scoring_system: highest impact
 queries:
@@ -244,24 +257,33 @@ queries:
       remediation:
         - id: console
           desc: |
-            DigitalOcean does not support moving an existing Droplet into a VPC directly. To fix this in the DigitalOcean Cloud Control Panel, create a snapshot of the Droplet, create a replacement Droplet from the snapshot inside the target VPC, and retire the original:
+            DigitalOcean does not support moving an existing Droplet into a VPC directly. The fix is a destructive cutover that replaces the Droplet, so plan for downtime and treat it as a migration rather than an in-place edit.
 
-            1. Navigate to **Images** > **Snapshots** and take a snapshot of the affected Droplet.
-            2. Create a new Droplet from the snapshot and select a VPC (not the default) in the **VPC Network** section.
-            3. Update DNS, firewall rules, and monitoring to point at the new Droplet.
-            4. Destroy the original Droplet.
+            To fix this in the DigitalOcean Cloud Control Panel, create a snapshot of the Droplet, create a replacement Droplet from the snapshot inside the target VPC, and retire the original:
+
+            1. Power down the Droplet before snapshotting so the disk is in a consistent state. A snapshot of a running Droplet can capture an incomplete filesystem.
+            2. Navigate to **Images** > **Snapshots** and take a snapshot of the affected Droplet.
+            3. Create a new Droplet from the snapshot and select a VPC, not the default, in the **VPC Network** section.
+            4. Update DNS, firewall rules, and monitoring to point at the new Droplet. The replacement Droplet receives a new public IP address, so anything that references the old IP must be updated.
+            5. Verify the replacement is serving traffic before retiring the original.
+            6. Destroy the original Droplet only after the replacement is confirmed healthy.
         - id: cli
           desc: |
-            To fix this on the command line using the `doctl` CLI, snapshot the Droplet and create a replacement inside the target VPC:
+            This fix is a destructive cutover that replaces the Droplet, so plan for downtime, keep the original until the replacement is verified, and note that the new Droplet receives a new public IP address.
+
+            To fix this on the command line using the `doctl` CLI, power down the Droplet for a consistent snapshot, then create a replacement inside the target VPC:
 
             ```bash
-            doctl compute droplet-action snapshot <droplet-id> --snapshot-name <name>
+            doctl compute droplet-action power-off <droplet-id> --wait
+            doctl compute droplet-action snapshot <droplet-id> --snapshot-name <name> --wait
             doctl compute droplet create <new-name> \
               --image <snapshot-id> \
               --size <size> \
               --region <region> \
               --vpc-uuid <vpc-uuid>
             ```
+
+            Verify the replacement is serving traffic, then destroy the original Droplet.
         - id: terraform
           desc: |
             To deploy Droplets inside a VPC in Terraform, set `vpc_uuid` on the `digitalocean_droplet` resource:
@@ -386,6 +408,88 @@ queries:
       - url: https://docs.digitalocean.com/products/networking/firewalls/
         title: DigitalOcean Cloud Firewalls overview
 
+  # Security-only check (compliance mapping intentionally omitted per maintainer).
+  # No Terraform variants: internetReachable is a runtime-computed exposure signal (IP + security group/firewall reachability) with no static config analog.
+  - uid: mondoo-digitalocean-security-droplet-not-internet-reachable
+    title: Ensure Droplets are not reachable from the internet
+    impact: 85
+    filters: asset.platform == "digitalocean"
+    mql: |
+      digitalocean.droplets.all( exposure.internetReachable == false )
+    docs:
+      desc: |
+        This check ensures that no Droplet is reachable from the public internet. `internetReachable` combines a public IP with firewall ingress that actually admits inbound traffic from any address — including the case where no Cloud Firewall covers the Droplet at all — so it reports a Droplet as exposed only when both conditions hold. This is a higher-fidelity "actually exposed" signal than a public-IP flag alone.
+
+        **Why this matters**
+
+        - **Reduced attack surface:** A Droplet with no internet-reachable path keeps its listening services off the public scanning grid entirely.
+        - **Defense in depth:** A public IP is harmless until a firewall rule (or a missing firewall) admits traffic to it; removing either side closes the path.
+        - **Fewer false alarms:** Because the signal correlates the IP with the firewall ingress, it surfaces Droplets that are genuinely exposed rather than every Droplet that merely holds a public address.
+
+        **Risk mitigation**
+
+        - **Internet-wide exploitation:** Prevents listening services from being probed and attacked by arbitrary internet hosts.
+        - **Lateral movement entry:** Removes a public foothold an attacker could use to reach the rest of the account's resources.
+
+        Intentionally public hosts such as bastions and public web servers will fail this check and should be exempted.
+      audit: |
+        ### Audit via Console
+
+        1. Sign in to the DigitalOcean [Cloud Control Panel](https://cloud.digitalocean.com/).
+        2. Navigate to **Droplets**, open each Droplet, and check the **Networking** tab for an assigned public IPv4 or IPv6 address.
+        3. In the same **Networking** tab, review the attached Cloud Firewalls and their inbound rules; a Droplet with no firewall admits all inbound traffic.
+
+        A passing Droplet either has no public IP, or is covered by firewalls whose inbound rules admit no `0.0.0.0/0` or `::/0` source. A failing Droplet has a public IP and a firewall rule (or no firewall coverage) that admits traffic from any address.
+
+        ### Audit via CLI
+
+        1. List Droplets with their public addresses, then cross-reference the firewalls that cover each:
+
+        ```bash
+        doctl compute droplet list --format ID,Name,PublicIPv4,PublicIPv6
+        doctl compute firewall list --format ID,Name,DropletIDs,Tags,InboundRules
+        ```
+
+        A passing Droplet either reports no public IP, or is covered by firewall inbound rules whose `address` values exclude `0.0.0.0/0` and `::/0`. A failing Droplet has a public IP combined with an inbound rule sourced from `0.0.0.0/0` or `::/0`, or no firewall coverage at all.
+      remediation:
+        - id: console
+          desc: |
+            To close the internet-reachable path in the DigitalOcean Cloud Control Panel:
+
+            1. Navigate to **Networking** > **Firewalls** and open (or create and attach) a firewall covering the affected Droplet.
+            2. Edit any inbound rule whose source is `All IPv4` (`0.0.0.0/0`) or `All IPv6` (`::/0`) and scope it to a specific trusted CIDR, tag, or Droplet ID.
+            3. If the Droplet does not need a public edge, plan a VPC-only cutover so it is reachable solely over private networking.
+        - id: cli
+          desc: |
+            To scope the world-open path on the command line using the `doctl` CLI, remove the unrestricted inbound rules and replace them with a trusted source. If the Droplet has no firewall, create one and attach it first:
+
+            ```bash
+            doctl compute firewall remove-rules "<firewall-id>" \
+              --inbound-rules "protocol:tcp,ports:443,address:0.0.0.0/0 protocol:tcp,ports:443,address:::/0"
+            doctl compute firewall add-rules "<firewall-id>" \
+              --inbound-rules "protocol:tcp,ports:443,address:203.0.113.0/24"
+            doctl compute firewall add-droplets "<firewall-id>" --droplet-ids <droplet-id>
+            ```
+        - id: terraform
+          desc: |
+            Keep Droplets off the public internet by covering them with a firewall whose `inbound_rule` blocks are scoped to trusted CIDRs rather than `0.0.0.0/0` or `::/0`:
+
+            ```hcl
+            resource "digitalocean_firewall" "scoped" {
+              name        = "scoped"
+              droplet_ids = [digitalocean_droplet.example.id]
+
+              inbound_rule {
+                protocol         = "tcp"
+                port_range       = "443"
+                source_addresses = ["203.0.113.0/24"]
+              }
+            }
+            ```
+    refs:
+      - url: https://docs.digitalocean.com/products/networking/firewalls/how-to/configure-rules/
+        title: Configure Cloud Firewall rules
+
   - uid: mondoo-digitalocean-security-firewall-no-unrestricted-ssh
     title: Ensure no firewall allows unrestricted inbound SSH (port 22)
     impact: 100
@@ -492,11 +596,9 @@ queries:
         title: Configure Cloud Firewall rules
 
   - uid: mondoo-digitalocean-security-firewall-no-unrestricted-ssh-digitalocean
-    filters: asset.platform == "digitalocean"
+    filters: asset.platform == "digitalocean-firewall"
     mql: |
-      digitalocean.firewalls.all(
-        ingressRules.where(openToInternet).none(protocol == "tcp" && ports == "22")
-      )
+      digitalocean.firewall.ingressRules.where(openToInternet).none(protocol == "tcp" && ports == "22")
   - uid: mondoo-digitalocean-security-firewall-no-unrestricted-ssh-terraform-hcl
     filters: asset.platform == "terraform-hcl" && terraform.resources.contains(nameLabel == "digitalocean_firewall")
     mql: |
@@ -629,11 +731,9 @@ queries:
         title: Configure Cloud Firewall rules
 
   - uid: mondoo-digitalocean-security-firewall-no-unrestricted-rdp-digitalocean
-    filters: asset.platform == "digitalocean"
+    filters: asset.platform == "digitalocean-firewall"
     mql: |
-      digitalocean.firewalls.all(
-        ingressRules.where(openToInternet).none(protocol == "tcp" && ports == "3389")
-      )
+      digitalocean.firewall.ingressRules.where(openToInternet).none(protocol == "tcp" && ports == "3389")
   - uid: mondoo-digitalocean-security-firewall-no-unrestricted-rdp-terraform-hcl
     filters: asset.platform == "terraform-hcl" && terraform.resources.contains(nameLabel == "digitalocean_firewall")
     mql: |
@@ -769,11 +869,9 @@ queries:
         title: Configure Cloud Firewall rules
 
   - uid: mondoo-digitalocean-security-firewall-no-unrestricted-db-ports-digitalocean
-    filters: asset.platform == "digitalocean"
+    filters: asset.platform == "digitalocean-firewall"
     mql: |
-      digitalocean.firewalls.all(
-        ingressRules.where(openToInternet).none(protocol == "tcp" && ports.in(["3306", "5432", "27017", "6379", "9092", "9200"]))
-      )
+      digitalocean.firewall.ingressRules.where(openToInternet).none(protocol == "tcp" && ports.in(["3306", "5432", "27017", "6379", "9092", "9200"]))
   - uid: mondoo-digitalocean-security-firewall-no-unrestricted-db-ports-terraform-hcl
     filters: asset.platform == "terraform-hcl" && terraform.resources.contains(nameLabel == "digitalocean_firewall")
     mql: |
@@ -914,11 +1012,9 @@ queries:
         title: Configure Cloud Firewall rules
 
   - uid: mondoo-digitalocean-security-firewall-no-all-ports-open-digitalocean
-    filters: asset.platform == "digitalocean"
+    filters: asset.platform == "digitalocean-firewall"
     mql: |
-      digitalocean.firewalls.all(
-        ingressRules.where(openToInternet).none(ports.in(["0", "all", "1-65535", "0-65535"]))
-      )
+      digitalocean.firewall.ingressRules.where(openToInternet).none(ports.in(["0", "all", "1-65535", "0-65535"]))
   - uid: mondoo-digitalocean-security-firewall-no-all-ports-open-terraform-hcl
     filters: asset.platform == "terraform-hcl" && terraform.resources.contains(nameLabel == "digitalocean_firewall")
     mql: |
@@ -972,7 +1068,7 @@ queries:
       compliance/soc2-2017: soc2-control-cc6-6-1
       compliance/vda-isa-5: vda-isa-5-5-2-7
     mql: |
-      digitalocean.databases.all(firewallRules != empty)
+      digitalocean.database.firewallRules != empty
     docs:
       desc: |
         This check ensures that every managed database cluster has at least one Trusted Sources entry, restricting inbound connections to specific Droplets, tags, Kubernetes clusters, applications, or IP addresses. By default, a newly created managed database cluster accepts connections from any source that presents valid credentials.
@@ -1099,13 +1195,21 @@ queries:
       remediation:
         - id: console
           desc: |
-            DigitalOcean does not support moving an existing managed database into a VPC. To fix this in the DigitalOcean Cloud Control Panel, create a fork or a new cluster in the desired VPC, migrate the data, and retire the original:
+            DigitalOcean does not support moving an existing managed database into a VPC. The fix is a destructive cutover to a replacement cluster, so plan for downtime and treat it as a migration.
+
+            A fork or new cluster does not inherit the source's Trusted Sources, database users, or connection pools, so you must re-apply them before cutover. A fork must be created in the same region as the source cluster.
+
+            To fix this in the DigitalOcean Cloud Control Panel, create a fork or a new cluster in the desired VPC, migrate the data, and retire the original:
 
             1. Navigate to **Databases** and open the affected cluster.
-            2. Create a fork (point-in-time snapshot) and, in the creation flow, select a VPC under **Network**.
-            3. Cut applications over to the new cluster's private endpoint, then destroy the original.
+            2. Create a fork, a point-in-time snapshot, and select a VPC under **Network** in the creation flow. Keep the fork in the same region as the source.
+            3. Re-create the database users, connection pools, and Trusted Sources on the new cluster, since these are not carried over.
+            4. Cut applications over to the new cluster's private endpoint and verify connectivity.
+            5. Destroy the original cluster only after the replacement is confirmed healthy.
         - id: cli
           desc: |
+            This fix is a destructive cutover to a replacement cluster, so plan for downtime. A new cluster created with `--private-network-uuid` is empty and does not inherit the source's Trusted Sources, database users, or connection pools, so you must migrate the data and re-apply those settings before cutover.
+
             To fix this on the command line using the `doctl` CLI, create a replacement cluster inside the target VPC and migrate data into it:
 
             ```bash
@@ -1114,6 +1218,8 @@ queries:
               --region <region> \
               --private-network-uuid <vpc-uuid>
             ```
+
+            After the cluster is created, migrate the data, re-create the users and connection pools, re-apply the Trusted Sources, then cut applications over and destroy the original.
         - id: terraform
           desc: |
             To attach a managed database to a VPC in Terraform, set `private_network_uuid` on the `digitalocean_database_cluster` resource:
@@ -1134,9 +1240,9 @@ queries:
         title: Connect to a managed database cluster
 
   - uid: mondoo-digitalocean-security-db-in-private-network-digitalocean
-    filters: asset.platform == "digitalocean"
+    filters: asset.platform == "digitalocean-database"
     mql: |
-      digitalocean.databases.all(privateNetworkUuid != "")
+      digitalocean.database.privateNetworkUuid != ""
   - uid: mondoo-digitalocean-security-db-in-private-network-terraform-hcl
     filters: asset.platform == "terraform-hcl" && terraform.resources.contains(nameLabel == "digitalocean_database_cluster")
     mql: |
@@ -1149,6 +1255,93 @@ queries:
     filters: asset.platform == "terraform-state" && terraform.state.resources.contains(type == "digitalocean_database_cluster")
     mql: |
       terraform.state.resources.where(type == "digitalocean_database_cluster").all(values.private_network_uuid != empty)
+
+  # No Terraform variants: internetReachable resolves the cluster's live public connection
+  # endpoint against its effective trusted-source firewall rules. The digitalocean_database_cluster
+  # Terraform resource exposes neither the resolved public reachability nor the evaluated
+  # trusted-source decision, so there is nothing equivalent to assert in HCL, plan, or state.
+  # The db-in-private-network and db-firewall-configured checks already cover the
+  # Terraform-expressible posture.
+  - uid: mondoo-digitalocean-security-db-not-internet-reachable
+    title: Ensure managed databases are not reachable from the internet
+    impact: 85
+    filters: asset.platform == "digitalocean-database"
+    mql: |
+      digitalocean.database.internetReachable == false
+    tags:
+      compliance/bsi-sys-1-5: false
+      compliance/csa-cloud-controls-matrix-4: cloud-controls-matrix-4-ivs-06
+      compliance/dora: dora-art-9
+      compliance/hipaa: hipaa-security-ss164-312-e-1-transmission
+      compliance/iso-27001-2022: iso-27001-2022-a-8-22
+      compliance/nis-2: nis-2-21-2-i
+      compliance/nist-csf-1: nist-csf-1-pr-ac-5
+      compliance/nist-csf-2: nist-csf-2-pr-ir-01
+      compliance/nist-sp-800-53-rev5: nist-sp-800-53-rev5-sc-7
+      compliance/nist-sp-800-171: nist-sp-800-171--3-13-5
+      compliance/pci-dss-4: pcidss-requirement-1-4-1
+      compliance/soc2-2017: soc2-control-cc6-1-5
+      compliance/vda-isa-5: vda-isa-5-5-2-7
+    docs:
+      desc: |
+        This check ensures that no managed database cluster is reachable from the public internet. `internetReachable` is true when the cluster has a public connection endpoint and its trusted-source firewall rules admit any address, including the case where no trusted sources are configured at all and the public endpoint is left open to every host. It is a higher-fidelity signal than the presence of a public endpoint alone because it accounts for whether the trusted-source rules actually restrict access.
+
+        **Why this matters**
+
+        - **Reduced attack surface:** A database that no internet host can reach is removed from the pool of targets for credential-stuffing and protocol-level attacks against the database engine.
+        - **Misconfiguration resilience:** Correlating the public endpoint with the trusted-source rules catches the common failure where a cluster keeps its public endpoint and the trusted-source list is empty or world-open.
+        - **Defense in depth:** Keeping the cluster private supplements engine authentication, so a weak or leaked credential is not directly exploitable from the internet.
+
+        **Risk mitigation**
+
+        - **Data exfiltration:** Removes the direct internet path an attacker would use to reach the database with stolen or brute-forced credentials.
+        - **Internet-wide scanning:** Takes the database endpoint off the public scanning grid entirely.
+      audit: |
+        ### Audit via Console
+
+        1. Sign in to the DigitalOcean [Cloud Control Panel](https://cloud.digitalocean.com/).
+        2. Navigate to **Databases** and open each cluster.
+        3. On the **Overview** tab, review the **Connection Details** for a public host, and on the **Settings** tab review the **Trusted Sources** list.
+
+        A passing database cluster either exposes no public connection endpoint or restricts its trusted sources to specific resources or CIDRs. A failing database cluster exposes a public endpoint while its trusted sources admit any address or are empty.
+
+        ### Audit via CLI
+
+        1. List clusters and inspect each cluster's trusted-source firewall rules:
+
+        ```bash
+        doctl databases list --format ID,Name,Engine
+        doctl databases firewalls list <database-id>
+        ```
+
+        A passing database cluster returns trusted-source rules that name specific droplets, tags, Kubernetes clusters, or narrow CIDRs. A failing database cluster returns an `ip_addr` rule of `0.0.0.0/0` or `::/0`, or no trusted-source rules at all while a public endpoint is in use.
+      remediation:
+        - id: console
+          desc: |
+            To close the internet-reachable path in the DigitalOcean Cloud Control Panel:
+
+            1. Navigate to **Databases** and open the affected cluster.
+            2. On the **Settings** tab, edit **Trusted Sources** and add the specific droplets, tags, Kubernetes clusters, or narrow CIDRs that need access.
+            3. Remove any trusted-source entry of `0.0.0.0/0` or `::/0`, and confirm at least one restrictive trusted source remains so the public endpoint is no longer open to every host.
+            4. Where the cluster does not need a public edge, attach it to a VPC and connect over the private endpoint instead.
+        - id: cli
+          desc: |
+            To restrict the trusted sources on the command line using the `doctl` CLI, replace any world-open rule with specific sources:
+
+            ```bash
+            doctl databases firewalls append <database-id> --rule ip_addr:203.0.113.10
+            doctl databases firewalls append <database-id> --rule droplet:<droplet-id>
+            doctl databases firewalls list <database-id>
+            ```
+
+            After confirming the restrictive rules are in place, remove the world-open rule by re-applying the full rule set without it using `doctl databases firewalls replace <database-id> --rule ...`.
+        # No Terraform remediation: internetReachable is a runtime correlation of the live
+        # public endpoint with the effective trusted-source rules and has no single
+        # configuration analog. Express the desired posture with the db-in-private-network
+        # and db-firewall-configured Terraform remediations instead.
+    refs:
+      - url: https://docs.digitalocean.com/products/databases/postgresql/how-to/secure/
+        title: Secure a managed database cluster
 
   - uid: mondoo-digitalocean-security-db-engine-supported-version
     title: Ensure managed database engines are not running an EOL version
@@ -1202,15 +1395,17 @@ queries:
       audit: |
         ### Audit via Console
 
+        Treat the versions that DigitalOcean currently offers as the authoritative list of supported versions. The set of EOL versions changes over time, so check the live `doctl databases options versions` output for each engine rather than relying on a static list. The version ranges below are examples that were EOL at the time of writing and may be incomplete now.
+
         1. Sign in to the DigitalOcean [Cloud Control Panel](https://cloud.digitalocean.com/).
         2. Navigate to **Databases** and review the **Engine Version** column for each cluster.
-        3. Compare each engine and version against the list of EOL versions: PostgreSQL 9.x through 13, MySQL 5.6 and 5.7, Redis 4 through 6, MongoDB 3.6 through 5.0, Kafka 2.8 through 3.4, and OpenSearch 1.x.
+        3. Compare each engine and version against the versions DigitalOcean currently offers for that engine. Examples of versions that were EOL at the time of writing include PostgreSQL 9.x through 13, MySQL 5.6 and 5.7, Redis 4 through 6, MongoDB 3.6 through 5.0, Kafka 2.8 through 3.4, and OpenSearch 1.x. Confirm the current set with the CLI step below.
 
-        A passing database cluster runs a currently supported engine version. A failing database cluster runs a version listed as EOL or end-of-support.
+        A passing database cluster runs a version that DigitalOcean still offers for its engine. A failing database cluster runs a version absent from the current supported list.
 
         ### Audit via CLI
 
-        1. List all clusters with their engine and version, then check available supported versions for comparison:
+        1. List all clusters with their engine and version, then check the versions DigitalOcean currently supports. Treat this live output as authoritative, since the supported set changes as versions reach EOL:
 
         ```bash
         doctl databases list --format ID,Name,Engine,Version,Region
@@ -1226,11 +1421,11 @@ queries:
       remediation:
         - id: console
           desc: |
-            Major-version upgrades for managed databases on DigitalOcean require a migration path. Review the DigitalOcean upgrade documentation for your engine, run the upgrade in a non-production clone first, then cut over. To fix this in the DigitalOcean Cloud Control Panel:
+            Major-version upgrades for managed databases on DigitalOcean require a migration path. First confirm the current supported target versions for your engine with `doctl databases options versions --engine <engine>`, since the supported set changes as versions reach EOL. Review the DigitalOcean upgrade documentation for your engine, run the upgrade in a non-production clone first, then cut over. To fix this in the DigitalOcean Cloud Control Panel:
 
             1. Navigate to **Databases** and open the affected cluster.
-            2. Go to **Settings** > **Upgrade Major Version** (availability depends on engine).
-            3. Follow the prompts; otherwise, create a new cluster on a supported version and migrate data using `pg_dump`/`mysqldump`/native replication.
+            2. Go to **Settings** > **Upgrade Major Version**. Availability depends on the engine.
+            3. Follow the prompts. Otherwise, create a new cluster on a supported version and migrate data using `pg_dump`, `mysqldump`, or native replication.
         - id: cli
           desc: |
             `doctl` does not perform an in-place major-version upgrade; `doctl databases migrate` only changes regions. Spin up a replacement cluster on a supported version and cut over with engine-native tools.
@@ -1289,14 +1484,14 @@ queries:
         title: Upgrade a managed database major version
 
   - uid: mondoo-digitalocean-security-db-engine-supported-version-digitalocean
-    filters: asset.platform == "digitalocean"
+    filters: asset.platform == "digitalocean-database"
     mql: |
-      digitalocean.databases.where(engine == "pg").all(version.notIn(["9", "9.5", "9.6", "10", "11", "12", "13"]))
-      digitalocean.databases.where(engine == "mysql").all(version.notIn(["5.6", "5.7"]))
-      digitalocean.databases.where(engine == "redis").all(version.notIn(["4", "5", "6"]))
-      digitalocean.databases.where(engine == "mongodb").all(version.notIn(["3.6", "4.0", "4.2", "4.4", "5.0"]))
-      digitalocean.databases.where(engine == "kafka").all(version.notIn(["2.8", "3.0", "3.1", "3.2", "3.3", "3.4"]))
-      digitalocean.databases.where(engine == "opensearch").all(version.notIn(["1.0", "1.1", "1.2", "1.3"]))
+      digitalocean.database.engine != "pg" || digitalocean.database.version.notIn(["9", "9.5", "9.6", "10", "11", "12", "13"])
+      digitalocean.database.engine != "mysql" || digitalocean.database.version.notIn(["5.6", "5.7"])
+      digitalocean.database.engine != "redis" || digitalocean.database.version.notIn(["4", "5", "6"])
+      digitalocean.database.engine != "mongodb" || digitalocean.database.version.notIn(["3.6", "4.0", "4.2", "4.4", "5.0"])
+      digitalocean.database.engine != "kafka" || digitalocean.database.version.notIn(["2.8", "3.0", "3.1", "3.2", "3.3", "3.4"])
+      digitalocean.database.engine != "opensearch" || digitalocean.database.version.notIn(["1.0", "1.1", "1.2", "1.3"])
   - uid: mondoo-digitalocean-security-db-engine-supported-version-terraform-hcl
     filters: asset.platform == "terraform-hcl" && terraform.resources.contains(nameLabel == "digitalocean_database_cluster")
     mql: |
@@ -1344,7 +1539,9 @@ queries:
       compliance/soc2-2017: soc2-control-cc6-7-2
       compliance/vda-isa-5: vda-isa-5-5-1-1
     mql: |
-      digitalocean.databases.all(certificates(pem: caCertificate).all(notAfter > time.now))
+      digitalocean.database {
+        certificates(pem: caCertificate).all(notAfter > time.now)
+      }
     docs:
       desc: |
         This check ensures that every managed database cluster advertises a CA certificate whose validity window has not passed. Clients verify the cluster's TLS endpoint by pinning to this CA; once it expires, every connection that performs TLS verification fails its handshake.
@@ -1531,11 +1728,11 @@ queries:
         title: Load balancer SSL termination and redirect
 
   - uid: mondoo-digitalocean-security-lb-http-redirected-to-https-digitalocean
-    filters: asset.platform == "digitalocean"
+    filters: asset.platform == "digitalocean-loadbalancer"
     mql: |
-      digitalocean.loadBalancers.all(
+      digitalocean.loadBalancer {
         forwardingRules.none(_["entry_protocol"] == "http") || redirectHttpToHttps == true
-      )
+      }
   - uid: mondoo-digitalocean-security-lb-http-redirected-to-https-terraform-hcl
     filters: asset.platform == "terraform-hcl" && terraform.resources.contains(nameLabel == "digitalocean_loadbalancer")
     mql: |
@@ -1559,6 +1756,92 @@ queries:
         values["forwarding_rule"].none(_["entry_protocol"] == "http") ||
         values.redirect_http_to_https == true
       )
+
+  # No Terraform variants: tlsCipherPolicy reflects the minimum TLS cipher policy resolved by
+  # the DigitalOcean load balancer service. The digitalocean_loadbalancer Terraform resource
+  # has no argument that selects between the DEFAULT and STRONG cipher policies, so the setting
+  # cannot be asserted in HCL, plan, or state.
+  - uid: mondoo-digitalocean-security-lb-strong-tls-cipher-policy
+    title: Ensure TLS load balancers enforce the strong TLS cipher policy
+    impact: 70
+    filters: asset.platform == "digitalocean-loadbalancer"
+    mql: |
+      digitalocean.loadBalancer {
+        forwardingRules.none(_["entry_protocol"] == "https" || _["entry_protocol"] == "tls") || tlsCipherPolicy == "STRONG"
+      }
+    tags:
+      compliance/bsi-sys-1-5: false
+      compliance/csa-cloud-controls-matrix-4: cloud-controls-matrix-4-cek-04
+      compliance/dora: dora-art-9
+      compliance/hipaa: hipaa-security-ss164-312-e-2-ii-transmission-security-encryption
+      compliance/iso-27001-2022: iso-27001-2022-a-8-24
+      compliance/nis-2: nis-2-21-2-h
+      compliance/nist-csf-1: nist-csf-1-pr-ds-2
+      compliance/nist-csf-2: nist-csf-2-pr-ds-02
+      compliance/nist-sp-800-53-rev5: nist-sp-800-53-rev5-sc-8
+      compliance/nist-sp-800-171: nist-sp-800-171--3-13-8
+      compliance/pci-dss-4: pcidss-requirement-4-2-1
+      compliance/soc2-2017: soc2-control-cc6-7-2
+      compliance/vda-isa-5: vda-isa-5-5-1-2
+    docs:
+      desc: |
+        This check ensures that any load balancer terminating TLS uses the `STRONG` minimum TLS cipher policy rather than the `DEFAULT` policy. The `STRONG` policy negotiates only TLS 1.2 and later with a restricted set of modern, forward-secret cipher suites, whereas the default policy permits a broader, weaker set for backward compatibility.
+
+        **Why this matters**
+
+        - **Modern ciphers only:** The strong policy removes cipher suites that lack forward secrecy or rely on weaker primitives, so captured traffic cannot be decrypted later if a key is compromised.
+        - **Downgrade resistance:** Restricting the negotiable protocol versions and ciphers narrows the room an attacker has to force a client onto a weaker connection.
+        - **Compliance alignment:** Frameworks that require strong cryptography for data in transit are satisfied by the restricted policy but not by the permissive default.
+
+        **Risk mitigation**
+
+        - **Traffic interception:** Enforcing strong cipher suites keeps TLS sessions resistant to passive decryption and known cipher-level attacks.
+        - **Standards drift:** Pinning the load balancer to the strong policy prevents weak ciphers from being negotiated as client populations change over time.
+      audit: |
+        ### Audit via Console
+
+        1. Sign in to the DigitalOcean [Cloud Control Panel](https://cloud.digitalocean.com/).
+        2. Navigate to **Networking** > **Load Balancers** and open each load balancer that has an HTTPS or TLS forwarding rule.
+        3. Go to **Settings** and review the **TLS Cipher Policy** value.
+
+        A passing load balancer terminating TLS shows the cipher policy set to **Strong**. A failing load balancer terminating TLS shows the **Default** cipher policy.
+
+        ### Audit via CLI
+
+        1. List load balancers and inspect the `tls_cipher_policy` field alongside the forwarding rules:
+
+        ```bash
+        doctl compute load-balancer list --output json | jq -r '.[] | [.id, .name, .tls_cipher_policy] | @tsv'
+        ```
+
+        A passing load balancer that terminates TLS returns `STRONG`. A failing load balancer that terminates TLS returns `DEFAULT` or an empty value.
+      remediation:
+        - id: console
+          desc: |
+            To enforce the strong cipher policy in the DigitalOcean Cloud Control Panel:
+
+            1. Navigate to **Networking** > **Load Balancers** and open the affected load balancer.
+            2. Go to **Settings** and set the **TLS Cipher Policy** to **Strong**.
+            3. Confirm that clients still negotiate successfully, since the strong policy drops TLS 1.1 and older and legacy ciphers.
+        - id: cli
+          desc: |
+            The `doctl compute load-balancer update` command replaces the full load balancer configuration, so any attribute you do not pass is reset to its default. Read the current configuration first, then re-apply it together with the strong cipher policy:
+
+            ```bash
+            doctl compute load-balancer get "<lb-id>" \
+              --format Name,Region,ForwardingRules,DropletIDs --no-header
+            doctl compute load-balancer update "<lb-id>" \
+              --name "<name>" \
+              --region "<region>" \
+              --forwarding-rules "<current-forwarding-rules>" \
+              --droplet-ids "<droplet-ids>" \
+              --tls-cipher-policy strong
+            ```
+        # No Terraform remediation: the digitalocean_loadbalancer resource has no argument for the
+        # minimum TLS cipher policy, so the STRONG policy cannot be set through Terraform.
+    refs:
+      - url: https://docs.digitalocean.com/products/networking/load-balancers/how-to/ssl-termination/
+        title: Load balancer SSL termination
 
   - uid: mondoo-digitalocean-security-lb-in-vpc
     title: Ensure load balancers are deployed inside a VPC
@@ -1673,9 +1956,9 @@ queries:
         title: DigitalOcean VPC overview
 
   - uid: mondoo-digitalocean-security-lb-in-vpc-digitalocean
-    filters: asset.platform == "digitalocean"
+    filters: asset.platform == "digitalocean-loadbalancer"
     mql: |
-      digitalocean.loadBalancers.all(vpc != null)
+      digitalocean.loadBalancer.vpc != null
   - uid: mondoo-digitalocean-security-lb-in-vpc-terraform-hcl
     filters: asset.platform == "terraform-hcl" && terraform.resources.contains(nameLabel == "digitalocean_loadbalancer")
     mql: |
@@ -1798,9 +2081,9 @@ queries:
         title: Upgrade a DOKS cluster
 
   - uid: mondoo-digitalocean-security-doks-auto-upgrade-enabled-digitalocean
-    filters: asset.platform == "digitalocean"
+    filters: asset.platform == "digitalocean-kubernetes-cluster"
     mql: |
-      digitalocean.kubernetesClusters.all(autoUpgrade == true)
+      digitalocean.kubernetes.cluster.autoUpgrade == true
   - uid: mondoo-digitalocean-security-doks-auto-upgrade-enabled-terraform-hcl
     filters: asset.platform == "terraform-hcl" && terraform.resources.contains(nameLabel == "digitalocean_kubernetes_cluster")
     mql: |
@@ -1923,11 +2206,9 @@ queries:
         title: DOKS supported Kubernetes releases
 
   - uid: mondoo-digitalocean-security-doks-supported-version-digitalocean
-    filters: asset.platform == "digitalocean"
+    filters: asset.platform == "digitalocean-kubernetes-cluster"
     mql: |
-      digitalocean.kubernetesClusters.all(
-        version == /^1\.(3[0-9]|[4-9][0-9]|[1-9][0-9]{2})\./
-      )
+      digitalocean.kubernetes.cluster.version == /^1\.(3[0-9]|[4-9][0-9]|[1-9][0-9]{2})\./
   - uid: mondoo-digitalocean-security-doks-supported-version-terraform-hcl
     filters: asset.platform == "terraform-hcl" && terraform.resources.contains(nameLabel == "digitalocean_kubernetes_cluster")
     mql: |
@@ -1970,7 +2251,7 @@ queries:
       compliance/soc2-2017: soc2-control-cc6-1-4
       compliance/vda-isa-5: vda-isa-5-4-1-2
     mql: |
-      digitalocean.kubernetesClusters.all(ssoEnabled == true)
+      digitalocean.kubernetes.cluster.ssoEnabled == true
     docs:
       desc: |
         This check ensures that every DOKS cluster has Single Sign-On (SSO) configured against an OIDC identity provider. Without SSO configured, cluster authentication relies entirely on static kubeconfig tokens with no identity-provider integration.
@@ -2049,7 +2330,7 @@ queries:
       compliance/soc2-2017: soc2-control-cc6-1-4
       compliance/vda-isa-5: vda-isa-5-4-1-2
     mql: |
-      digitalocean.kubernetesClusters.all(ssoRequired == true)
+      digitalocean.kubernetes.cluster.ssoRequired == true
     docs:
       desc: |
         This check ensures that every DOKS cluster has SSO both configured and required for all cluster authentication, so that kubectl access is authenticated through the OIDC identity provider rather than through static tokens. Enabling SSO without requiring it leaves static-token paths active.
@@ -2105,6 +2386,221 @@ queries:
     refs:
       - url: https://docs.digitalocean.com/products/kubernetes/how-to/manage-cluster-access/
         title: Manage DOKS cluster access
+
+  - uid: mondoo-digitalocean-security-doks-in-vpc
+    title: Ensure DOKS clusters are deployed inside a VPC
+    impact: 70
+    tags:
+      compliance/bsi-sys-1-5: false
+      compliance/csa-cloud-controls-matrix-4: cloud-controls-matrix-4-ivs-03
+      compliance/dora: dora-art-9
+      compliance/hipaa: hipaa-security-ss164-312-e-1-transmission
+      compliance/iso-27001-2022: iso-27001-2022-a-8-22
+      compliance/nis-2: nis-2-21-2-i
+      compliance/nist-csf-1: nist-csf-1-pr-ac-5
+      compliance/nist-csf-2: nist-csf-2-pr-ir-01
+      compliance/nist-sp-800-53-rev5: nist-sp-800-53-rev5-sc-7
+      compliance/nist-sp-800-171: nist-sp-800-171--3-13-1
+      compliance/pci-dss-4: pcidss-requirement-1-3-1
+      compliance/soc2-2017: soc2-control-cc6-1-5
+      compliance/vda-isa-5: vda-isa-5-5-2-7
+    variants:
+      - uid: mondoo-digitalocean-security-doks-in-vpc-digitalocean
+        tags:
+          mondoo.com/filter-title: DigitalOcean
+          mondoo.com/filter-icon: digitalocean
+      - uid: mondoo-digitalocean-security-doks-in-vpc-terraform-hcl
+        tags:
+          mondoo.com/filter-title: Terraform HCL
+          mondoo.com/filter-icon: terraform
+      - uid: mondoo-digitalocean-security-doks-in-vpc-terraform-plan
+        tags:
+          mondoo.com/filter-title: Terraform Plan
+          mondoo.com/filter-icon: terraform
+      - uid: mondoo-digitalocean-security-doks-in-vpc-terraform-state
+        tags:
+          mondoo.com/filter-title: Terraform State
+          mondoo.com/filter-icon: terraform
+    docs:
+      desc: |
+        This check ensures that every DigitalOcean Kubernetes (DOKS) cluster is deployed inside a Virtual Private Cloud (VPC). When a cluster is not assigned a VPC at creation time, its worker nodes communicate over the default network rather than an isolated private network boundary.
+
+        **Why this matters**
+
+        - **Network segmentation:** A VPC gives the cluster's worker nodes a private network boundary that contains intra-cluster and node-to-resource traffic instead of routing it across the shared default network.
+        - **Private connectivity:** VPC membership lets the cluster reach managed databases, Droplets, and load balancers in the same VPC over private IPs, keeping that traffic off public addresses.
+        - **Lateral movement containment:** A compromised node in a VPC-isolated cluster has a narrower reachable network than one on the default network, limiting how far an attacker can pivot.
+
+        **Risk mitigation**
+
+        - **Reduced attack surface:** Keeping node-to-resource traffic on a private network removes the exposure window that arises when those connections traverse public interfaces.
+        - **Defense in depth:** VPC isolation supplements Kubernetes-level network policies and cloud firewalls, so a single misconfiguration in one layer does not immediately expose the cluster's internal traffic.
+      audit: |
+        ### Audit via Console
+
+        1. Sign in to the DigitalOcean [Cloud Control Panel](https://cloud.digitalocean.com/).
+        2. Navigate to **Kubernetes** and open each cluster.
+        3. On the **Overview** tab, check the **VPC Network** assignment.
+
+        A passing cluster shows a named VPC. A failing cluster shows no VPC or only the default network.
+
+        ### Audit via CLI
+
+        1. List all clusters and inspect each cluster's VPC UUID:
+
+        ```bash
+        doctl kubernetes cluster list --output json | jq -r '.[] | [.id, .name, .vpc_uuid] | @tsv'
+        ```
+
+        A passing cluster returns a non-empty `vpc_uuid`. A failing cluster returns an empty value.
+      remediation:
+        - id: console
+          desc: |
+            DigitalOcean does not support moving an existing DOKS cluster into a different VPC. The fix is to create a replacement cluster in the target VPC and migrate workloads, so plan for a cutover.
+
+            1. Navigate to **Kubernetes** and create a new cluster.
+            2. In the creation flow, select the target VPC under **VPC Network**.
+            3. Re-deploy workloads (for example with `kubectl` or your GitOps pipeline) to the new cluster and verify connectivity.
+            4. Repoint ingress and DNS, then delete the original cluster.
+        - id: cli
+          desc: |
+            Create a replacement cluster inside the target VPC and migrate workloads, since the VPC cannot be changed in place:
+
+            ```bash
+            doctl kubernetes cluster create <new-name> \
+              --region <region> \
+              --vpc-uuid <vpc-uuid> \
+              --node-pool "name=default;size=s-1vcpu-2gb;count=3"
+            ```
+
+            Migrate workloads to the new cluster, verify, then delete the original.
+        - id: terraform
+          desc: |
+            To deploy a DOKS cluster inside a VPC in Terraform, set `vpc_uuid` on the `digitalocean_kubernetes_cluster` resource:
+
+            ```hcl
+            resource "digitalocean_kubernetes_cluster" "example" {
+              name     = "example"
+              region   = "nyc3"
+              version  = "1.31.1-do.0"
+              vpc_uuid = digitalocean_vpc.example.id
+
+              node_pool {
+                name       = "default"
+                size       = "s-1vcpu-2gb"
+                node_count = 3
+              }
+            }
+            ```
+    refs:
+      - url: https://docs.digitalocean.com/products/networking/vpc/
+        title: DigitalOcean VPC overview
+
+  - uid: mondoo-digitalocean-security-doks-in-vpc-digitalocean
+    filters: asset.platform == "digitalocean-kubernetes-cluster"
+    mql: |
+      digitalocean.kubernetes.cluster.vpc != null
+  - uid: mondoo-digitalocean-security-doks-in-vpc-terraform-hcl
+    filters: asset.platform == "terraform-hcl" && terraform.resources.contains(nameLabel == "digitalocean_kubernetes_cluster")
+    mql: |
+      terraform.resources("digitalocean_kubernetes_cluster").all(arguments.vpc_uuid != empty)
+  - uid: mondoo-digitalocean-security-doks-in-vpc-terraform-plan
+    filters: asset.platform == "terraform-plan" && terraform.plan.resourceChanges.contains(type == "digitalocean_kubernetes_cluster")
+    mql: |
+      terraform.plan.resourceChanges.where(type == "digitalocean_kubernetes_cluster").all(change.after.vpc_uuid != empty)
+  - uid: mondoo-digitalocean-security-doks-in-vpc-terraform-state
+    filters: asset.platform == "terraform-state" && terraform.state.resources.contains(type == "digitalocean_kubernetes_cluster")
+    mql: |
+      terraform.state.resources.where(type == "digitalocean_kubernetes_cluster").all(values.vpc_uuid != empty)
+
+  # No Terraform variants: the control-plane firewall is enforced by the managed DOKS control
+  # plane and surfaced as live posture. controlPlaneFirewallEnabled is null until the feature is
+  # configured through the API, and the check correlates that flag with the resolved
+  # allowed-address list to reject a world-open allowlist. Expressing both the null-until-set
+  # state and the public-CIDR exclusion across digitalocean_kubernetes_cluster HCL, plan, and
+  # state would be fragile, so this check is runtime-only.
+  - uid: mondoo-digitalocean-security-doks-control-plane-firewall-enabled
+    title: Ensure DOKS clusters restrict API server access with a firewall
+    impact: 90
+    filters: asset.platform == "digitalocean-kubernetes-cluster"
+    mql: |
+      digitalocean.kubernetes.cluster.controlPlaneFirewallEnabled == true
+      digitalocean.kubernetes.cluster.controlPlaneFirewallAllowedAddresses == empty || digitalocean.kubernetes.cluster.controlPlaneFirewallAllowedAddresses.containsNone(["0.0.0.0/0", "::/0"])
+    tags:
+      compliance/bsi-sys-1-5: false
+      compliance/csa-cloud-controls-matrix-4: cloud-controls-matrix-4-ivs-06
+      compliance/dora: dora-art-9
+      compliance/hipaa: hipaa-security-ss164-312-e-1-transmission
+      compliance/iso-27001-2022: iso-27001-2022-a-8-22
+      compliance/nis-2: nis-2-21-2-i
+      compliance/nist-csf-1: nist-csf-1-pr-ac-5
+      compliance/nist-csf-2: nist-csf-2-pr-ir-01
+      compliance/nist-sp-800-53-rev5: nist-sp-800-53-rev5-sc-7
+      compliance/nist-sp-800-171: nist-sp-800-171--3-13-5
+      compliance/pci-dss-4: pcidss-requirement-1-3-1
+      compliance/soc2-2017: soc2-control-cc6-1-5
+      compliance/vda-isa-5: vda-isa-5-5-2-7
+    docs:
+      desc: |
+        This check ensures that every DigitalOcean Kubernetes (DOKS) cluster enables the control-plane firewall and does not list `0.0.0.0/0` or `::/0` among its allowed addresses. The control-plane firewall restricts which source addresses can reach the cluster's Kubernetes API server. When it is disabled, the API server accepts connections from any internet host; when it is enabled but allows any address, the restriction is effectively removed.
+
+        **Why this matters**
+
+        - **The API server is the cluster's control surface:** Anyone who can reach the Kubernetes API server can attempt authentication, exploit an API-level vulnerability, or probe for misconfigurations that grant access to workloads and secrets.
+        - **Authentication is not the only layer:** Even with strong authentication, an internet-reachable API server remains a target for credential attacks and for any future flaw in the API server itself.
+        - **A scoped allowlist contains blast radius:** Restricting the API server to known administrative and CI/CD source ranges removes it from internet-wide scanning entirely.
+
+        **Risk mitigation**
+
+        - **Cluster takeover:** Limiting which sources can reach the API server cuts off the primary network path an attacker would use to compromise the control plane.
+        - **Internet-wide scanning:** A firewalled API server is not discoverable by mass scanners probing for exposed Kubernetes endpoints.
+
+        Administrative and CI/CD source ranges that legitimately need API access should be added to the allowed-address list rather than leaving the firewall open.
+      audit: |
+        ### Audit via Console
+
+        1. Sign in to the DigitalOcean [Cloud Control Panel](https://cloud.digitalocean.com/).
+        2. Navigate to **Kubernetes** and open each cluster.
+        3. On the **Settings** tab, review the **Control plane firewall** configuration.
+
+        A passing cluster has the control plane firewall enabled with the allowed addresses scoped to specific trusted CIDRs. A failing cluster has the firewall disabled, or enabled with `0.0.0.0/0` or `::/0` in the allowed addresses.
+
+        ### Audit via CLI
+
+        1. List clusters, then inspect each cluster's control-plane firewall settings:
+
+        ```bash
+        doctl kubernetes cluster list --format ID,Name
+        doctl kubernetes cluster get <cluster-id> --output json | jq -r '.[] | [.name, .control_plane_firewall.enabled, (.control_plane_firewall.allowed_addresses | join(","))] | @tsv'
+        ```
+
+        A passing cluster returns `true` for the firewall with an allowed-address list that excludes `0.0.0.0/0` and `::/0`. A failing cluster returns `false`, or `true` with an unrestricted address in the list.
+      remediation:
+        - id: console
+          desc: |
+            To restrict API server access in the DigitalOcean Cloud Control Panel:
+
+            1. Navigate to **Kubernetes** and open the affected cluster.
+            2. On the **Settings** tab, enable the **Control plane firewall**.
+            3. Add the specific administrative and CI/CD source CIDRs that need API access, and ensure neither `0.0.0.0/0` nor `::/0` is present.
+            4. Confirm that your management tooling can still reach the cluster after the change.
+        - id: cli
+          desc: |
+            To enable and scope the control-plane firewall on the command line using the `doctl` CLI:
+
+            ```bash
+            doctl kubernetes cluster update <cluster-id> \
+              --enable-control-plane-firewall=true \
+              --control-plane-firewall-allowed-addresses "203.0.113.0/24,198.51.100.10/32"
+            ```
+
+            Replace the addresses with the trusted source ranges that need API access. Verify connectivity from an allowed range afterward.
+        # No Terraform remediation: controlPlaneFirewallEnabled is a managed control-plane posture
+        # surfaced only by the live API; the digitalocean_kubernetes_cluster resource does not
+        # express the control-plane firewall, so it cannot be remediated through Terraform.
+    refs:
+      - url: https://docs.digitalocean.com/products/kubernetes/how-to/configure-control-plane-firewall/
+        title: Configure the DOKS control plane firewall
 
   # No Terraform variants: this check inspects the certificate's notAfter validity
   # window — runtime telemetry set at issuance, not a configuration field. The
@@ -2172,7 +2668,9 @@ queries:
             3. Update any load balancers, CDN endpoints, or App Platform apps referencing the old certificate.
         - id: cli
           desc: |
-            To fix this on the command line using the `doctl` CLI, create a renewed Let's Encrypt certificate and then update any consumers to reference it:
+            To fix this on the command line using the `doctl` CLI, create a renewed certificate and then update any consumers to reference it. Choose the variant that matches how the domain's DNS is hosted.
+
+            If the domain's DNS is managed by DigitalOcean, create a Let's Encrypt certificate. The `--type lets_encrypt` flag only works when DigitalOcean controls the domain's DNS records, because DigitalOcean must publish the validation records itself:
 
             ```bash
             doctl compute certificate create \
@@ -2180,6 +2678,19 @@ queries:
               --type lets_encrypt \
               --dns-names <domain>
             ```
+
+            If the domain's DNS is hosted elsewhere or the certificate was issued by an external CA, upload it as a custom certificate instead:
+
+            ```bash
+            doctl compute certificate create \
+              --name <new-name> \
+              --type custom \
+              --leaf-certificate-path <cert.pem> \
+              --certificate-chain-path <chain.pem> \
+              --private-key-path <privkey.pem>
+            ```
+
+            After creating the replacement, update any load balancers, CDN endpoints, or App Platform apps to reference the new certificate.
         # No Terraform remediation: expiry is not a configurable field. A digitalocean_certificate resource can provision a replacement, but Terraform cannot express or assert the validity window of an issued certificate.
     refs:
       - url: https://docs.digitalocean.com/products/networking/certificates/
@@ -2503,15 +3014,18 @@ queries:
       remediation:
         - id: console
           desc: |
-            To remove anonymous read access from the Cloud Control Panel:
+            This finding is about the bucket's `public-read` ACL, which is a different control from the **File Listing** toggle in the Cloud Control Panel. The File Listing setting only governs anonymous directory browsing; it does not remove a `public-read` ACL grant, so objects can still be downloaded by anyone even after File Listing is restricted. The ACL is changed through the S3-compatible API or `s3cmd`, not the panel.
 
-            1. Navigate to **Spaces Object Storage** and open the affected bucket.
-            2. Open the **Settings** tab.
-            3. Under **File Listing**, switch the setting from **Enabled (Public)** to **Restricted (Signed URLs only)**.
-            4. Audit existing objects that have individual public ACLs and reset them with the API or `s3cmd setacl --acl-private`.
-            5. If the bucket must serve public content, route requests through a DigitalOcean CDN endpoint or a Worker-equivalent pattern that enforces auth or rate limits.
+            To remove anonymous read access:
+
+            1. Set the bucket ACL to private using `s3cmd setacl s3://<bucket> --acl-private` or the equivalent `aws s3api put-bucket-acl --acl private` call shown in the CLI remediation. This is the change that clears the finding.
+            2. Reset any individual objects that carry their own public ACLs to private, since a private bucket ACL does not override per-object grants.
+            3. In the Cloud Control Panel, navigate to **Spaces Object Storage**, open the bucket, and on the **Settings** tab set **File Listing** to **Restricted (Signed URLs only)** as defense in depth.
+            4. If the bucket must serve public content, route requests through a DigitalOcean CDN endpoint or a pattern that enforces auth or rate limits.
         - id: cli
           desc: |
+            DigitalOcean Spaces is S3-compatible, so you manage its ACLs with the AWS CLI or `s3cmd` pointed at the Spaces endpoint rather than with `doctl`. The `<spaces-key>` and `<spaces-secret>` are a Spaces access key pair generated on the **Spaces Keys** page in the API section of the control panel; they are not the DigitalOcean API token. Install the AWS CLI first, and set `<region>` to the Spaces region slug such as `nyc3`.
+
             To remove anonymous read access using the S3-compatible API:
 
             ```bash
@@ -2547,9 +3061,9 @@ queries:
         title: Spaces S3 compatibility reference
 
   - uid: mondoo-digitalocean-security-spaces-bucket-not-publicly-readable-digitalocean
-    filters: asset.platform == "digitalocean"
+    filters: asset.platform == "digitalocean-spaces-bucket"
     mql: |
-      digitalocean.spacesBuckets.none(publicReadAcl)
+      digitalocean.spacesBucket.publicReadAcl == false
   - uid: mondoo-digitalocean-security-spaces-bucket-not-publicly-readable-terraform-hcl
     filters: asset.platform == "terraform-hcl" && terraform.resources.contains(nameLabel == "digitalocean_spaces_bucket")
     mql: |
@@ -2582,7 +3096,7 @@ queries:
       compliance/soc2-2017: soc2-control-cc6-1-3
       compliance/vda-isa-5: vda-isa-5-4-2-1
     mql: |
-      digitalocean.spacesBuckets.none(publicWriteAcl)
+      digitalocean.spacesBucket.publicWriteAcl == false
     docs:
       desc: |
         This check ensures that no Spaces bucket grants the `WRITE` permission to the `AllUsers` group. An anonymously writable bucket lets any unauthenticated caller upload, overwrite, or delete objects, turning the bucket into a free hosting and laundering point for malicious payloads.
@@ -2667,7 +3181,7 @@ queries:
       compliance/soc2-2017: soc2-control-cc6-1-10
       compliance/vda-isa-5: vda-isa-5-5-1-1
     mql: |
-      digitalocean.spacesBuckets.all(encryptionEnabled)
+      digitalocean.spacesBucket.encryptionEnabled
     docs:
       desc: |
         This check ensures that every Spaces bucket has a default server-side encryption configuration set. When default encryption is configured, every object written to the bucket is encrypted at rest by the platform, removing the need for clients to remember to apply per-request encryption.
@@ -2709,6 +3223,8 @@ queries:
             Spaces does not expose default-encryption configuration in the Cloud Control Panel for every region. Apply the configuration with the CLI or S3-compatible API instead; see the CLI remediation below.
         - id: cli
           desc: |
+            Spaces is S3-compatible, so use the AWS CLI pointed at the Spaces endpoint. The `<spaces-key>` and `<spaces-secret>` come from the **Spaces Keys** page in the API section of the control panel, not the DigitalOcean API token, and `<region>` is the Spaces region slug such as `nyc3`.
+
             Apply a bucket-level default encryption configuration with the S3-compatible API:
 
             ```bash
@@ -2816,6 +3332,8 @@ queries:
             4. Pair versioning with a lifecycle rule that expires noncurrent versions after a defined retention window so the bucket does not grow unbounded.
         - id: cli
           desc: |
+            Spaces is S3-compatible, so use the AWS CLI pointed at the Spaces endpoint. The `<spaces-key>` and `<spaces-secret>` come from the **Spaces Keys** page in the API section of the control panel, not the DigitalOcean API token, and `<region>` is the Spaces region slug such as `nyc3`.
+
             To enable versioning using the S3-compatible API:
 
             ```bash
@@ -2854,9 +3372,9 @@ queries:
         title: Spaces S3 compatibility reference
 
   - uid: mondoo-digitalocean-security-spaces-bucket-versioning-enabled-digitalocean
-    filters: asset.platform == "digitalocean"
+    filters: asset.platform == "digitalocean-spaces-bucket"
     mql: |
-      digitalocean.spacesBuckets.all(versioningStatus == "Enabled")
+      digitalocean.spacesBucket.versioningStatus == "Enabled"
   - uid: mondoo-digitalocean-security-spaces-bucket-versioning-enabled-terraform-hcl
     filters: asset.platform == "terraform-hcl" && terraform.resources.contains(nameLabel == "digitalocean_spaces_bucket")
     mql: |
@@ -2869,6 +3387,389 @@ queries:
     filters: asset.platform == "terraform-state" && terraform.state.resources.contains(type == "digitalocean_spaces_bucket")
     mql: |
       terraform.state.resources.where(type == "digitalocean_spaces_bucket").all(values["versioning"] != null && values["versioning"].any(_["enabled"] == true))
+
+  # No Terraform variants: the AuthenticatedUsers ACL grant is applied through the
+  # S3-compatible API; the digitalocean_spaces_bucket.acl argument exposes only
+  # "private" and "public-read", so there is no HCL surface for the authenticated-read
+  # grant. The runtime variant catches buckets where it was set out of band.
+  - uid: mondoo-digitalocean-security-spaces-bucket-not-authenticated-readable
+    title: Ensure Spaces buckets do not grant read access to all authenticated users
+    impact: 80
+    filters: asset.platform == "digitalocean-spaces-bucket"
+    tags:
+      compliance/bsi-sys-1-5: false
+      compliance/csa-cloud-controls-matrix-4: cloud-controls-matrix-4-iam-05
+      compliance/dora: dora-art-9
+      compliance/hipaa: hipaa-security-ss164-312-a-1-access-control
+      compliance/iso-27001-2022: iso-27001-2022-a-8-3
+      compliance/nis-2: nis-2-21-2-i
+      compliance/nist-csf-1: nist-csf-1-pr-ac-4
+      compliance/nist-csf-2: nist-csf-2-pr-aa-05
+      compliance/nist-sp-800-53-rev5: nist-sp-800-53-rev5-ac-3
+      compliance/nist-sp-800-171: nist-sp-800-171--3-1-1
+      compliance/pci-dss-4: pcidss-requirement-7-2-1
+      compliance/soc2-2017: soc2-control-cc6-1-3
+      compliance/vda-isa-5: vda-isa-5-4-2-1
+    mql: |
+      digitalocean.spacesBucket.authenticatedReadAcl == false
+    docs:
+      desc: |
+        This check ensures that no Spaces bucket grants the `READ` permission to the `AuthenticatedUsers` group. In the S3-compatible ACL model that DigitalOcean Spaces implements, `AuthenticatedUsers` is not limited to the bucket owner's account — it covers every authenticated S3-compatible principal, including any DigitalOcean or AWS account on the internet. A bucket with this grant is effectively listable and readable by anyone willing to authenticate.
+
+        **Why this matters**
+
+        - **Near-public exposure:** The `AuthenticatedUsers` group is satisfied by any valid S3-compatible credential, so an `authenticated-read` grant exposes object listings and contents to essentially the entire authenticated internet, not to a trusted subset.
+        - **Misleading ACL label:** Operators often read `authenticated-read` as "only my account," when it actually means "any authenticated account," making it a quietly over-permissive setting that survives review.
+        - **Data leak path:** Logs, backups, and uploads accumulated in such a bucket are reachable by outside accounts without any per-bucket authorization, the same exposure class as a fully public bucket but harder to spot.
+
+        **Risk mitigation**
+
+        - **Owner-scoped access:** Removing the `AuthenticatedUsers` grant restores access to the bucket owner and explicitly granted principals only, forcing all other retrieval through scoped Spaces access keys or pre-signed URLs.
+        - **Reviewable intent:** A private bucket ACL makes any future grant an explicit, auditable decision rather than a label that hides cross-account reach.
+      audit: |
+        ### Audit via Console
+
+        1. Sign in to the DigitalOcean [Cloud Control Panel](https://cloud.digitalocean.com/).
+        2. Navigate to **Spaces Object Storage** and open each bucket.
+        3. Spaces does not surface the `AuthenticatedUsers` ACL grant in the panel; inspect it with the S3-compatible API in the CLI step below.
+
+        ### Audit via CLI
+
+        1. Retrieve the bucket ACL with the S3-compatible API and look for an `AuthenticatedUsers` grantee:
+
+        ```bash
+        doctl spaces buckets list
+        AWS_ACCESS_KEY_ID=<spaces-key> AWS_SECRET_ACCESS_KEY=<spaces-secret> \
+          aws s3api get-bucket-acl --bucket <bucket> \
+            --endpoint-url https://<region>.digitaloceanspaces.com
+        ```
+
+        A passing bucket returns grants only to the bucket owner. A failing bucket returns a grant where `Grantee.URI` is `http://acs.amazonaws.com/groups/global/AuthenticatedUsers` and `Permission` is `READ` or `FULL_CONTROL`.
+      remediation:
+        - id: console
+          desc: |
+            Spaces does not expose the `AuthenticatedUsers` grant in the Cloud Control Panel; reset the ACL to private with the S3-compatible API shown in the CLI remediation below, then confirm the bucket no longer carries the grant.
+        - id: cli
+          desc: |
+            DigitalOcean Spaces is S3-compatible, so manage its ACLs with the AWS CLI pointed at the Spaces endpoint. The `<spaces-key>` and `<spaces-secret>` come from the **Spaces Keys** page in the API section of the control panel, not the DigitalOcean API token, and `<region>` is the Spaces region slug such as `nyc3`.
+
+            ```bash
+            AWS_ACCESS_KEY_ID=<spaces-key> AWS_SECRET_ACCESS_KEY=<spaces-secret> \
+              aws s3api put-bucket-acl --bucket <bucket> --acl private \
+                --endpoint-url https://<region>.digitaloceanspaces.com
+            ```
+
+            If specific accounts genuinely need access, grant them individually with `--grant-read id=<canonical-id>` rather than re-applying the `authenticated-read` group grant.
+        # No Terraform remediation: the digitalocean_spaces_bucket.acl argument accepts only "private" and "public-read"; the authenticated-read group grant is applied through the runtime S3 API and has no Terraform analog.
+    refs:
+      - url: https://docs.digitalocean.com/products/spaces/reference/s3-compatibility/
+        title: Spaces S3 compatibility reference
+
+  # No Terraform variants: a bucket policy is declared in a separate
+  # digitalocean_spaces_bucket_policy resource whose `policy` is a free-form JSON
+  # document keyed to the bucket by name, so asserting "no policy grants public access"
+  # requires parsing that JSON and correlating it back to each bucket — awkward to do
+  # reliably in MQL on Terraform sources. The runtime variant inspects the resolved
+  # policy document directly.
+  - uid: mondoo-digitalocean-security-spaces-bucket-policy-not-public
+    title: Ensure Spaces bucket policies do not grant public access
+    impact: 90
+    filters: asset.platform == "digitalocean-spaces-bucket"
+    tags:
+      compliance/bsi-sys-1-5: false
+      compliance/csa-cloud-controls-matrix-4: cloud-controls-matrix-4-iam-05
+      compliance/dora: dora-art-9
+      compliance/hipaa: hipaa-security-ss164-312-a-1-access-control
+      compliance/iso-27001-2022: iso-27001-2022-a-8-3
+      compliance/nis-2: nis-2-21-2-i
+      compliance/nist-csf-1: nist-csf-1-pr-ac-4
+      compliance/nist-csf-2: nist-csf-2-pr-aa-05
+      compliance/nist-sp-800-53-rev5: nist-sp-800-53-rev5-ac-3
+      compliance/nist-sp-800-171: nist-sp-800-171--3-1-1
+      compliance/pci-dss-4: pcidss-requirement-7-2-1
+      compliance/soc2-2017: soc2-control-cc6-1-3
+      compliance/vda-isa-5: vda-isa-5-4-2-1
+    mql: |
+      digitalocean.spacesBucket.policy == null ||
+      digitalocean.spacesBucket.policy["Statement"].where(_["Effect"] == "Allow").all(_["Principal"] != "*")
+    docs:
+      desc: |
+        This check ensures that no Spaces bucket policy contains an `Allow` statement whose `Principal` is the anonymous wildcard `"*"`. A bucket policy is evaluated independently of the bucket ACL, so a policy that allows `"*"` grants unauthenticated access to every caller even when the ACL is private. This is the bucket-policy counterpart to the ACL-based public-read and public-write checks.
+
+        **Why this matters**
+
+        - **ACL-independent exposure:** Access controls on Spaces come from both the ACL and the bucket policy; a wildcard-principal policy statement opens the bucket to anyone regardless of how restrictive the ACL is.
+        - **Broad action grants:** Policy statements often grant `s3:GetObject`, `s3:ListBucket`, or `s3:*`; with `Principal: "*"` these actions become available to the entire internet without credentials.
+        - **Easy to overlook:** Because the policy is a separate JSON document from the ACL, a public policy can be present on a bucket whose ACL review came back clean, leaving a gap that ACL-only checks miss.
+
+        **Risk mitigation**
+
+        - **Principal scoping:** Replacing `"*"` with specific account or Spaces-key principals confines policy-granted access to known identities.
+        - **Layered review:** Auditing the policy alongside the ACL closes the most common path by which a bucket ends up effectively public despite a private ACL.
+      audit: |
+        ### Audit via Console
+
+        1. Sign in to the DigitalOcean [Cloud Control Panel](https://cloud.digitalocean.com/).
+        2. Open the affected bucket under **Spaces Object Storage**.
+        3. On the **Settings** tab, review any attached bucket policy for a statement whose `Principal` is `"*"` with `Effect: "Allow"`.
+
+        A passing bucket has no policy, or no `Allow` statement with a `"*"` principal. A failing bucket has an `Allow` statement granting access to `"*"`.
+
+        ### Audit via CLI
+
+        1. Retrieve the bucket policy with the S3-compatible API and inspect its statements:
+
+        ```bash
+        AWS_ACCESS_KEY_ID=<spaces-key> AWS_SECRET_ACCESS_KEY=<spaces-secret> \
+          aws s3api get-bucket-policy --bucket <bucket> \
+            --endpoint-url https://<region>.digitaloceanspaces.com \
+          | jq -r '.Policy | fromjson | .Statement[] | [.Effect, (.Principal|tostring)] | @tsv'
+        ```
+
+        A passing bucket returns `NoSuchBucketPolicy` or no `Allow` statement with a `"*"` principal. A failing bucket returns an `Allow` statement whose principal is `"*"`.
+      remediation:
+        - id: console
+          desc: |
+            Spaces bucket policies are managed through the S3-compatible API rather than the Cloud Control Panel. Use the CLI remediation below to remove or scope the public statement, then confirm the change on the bucket's **Settings** tab.
+        - id: cli
+          desc: |
+            DigitalOcean Spaces is S3-compatible, so manage its policy with the AWS CLI pointed at the Spaces endpoint. The `<spaces-key>` and `<spaces-secret>` come from the **Spaces Keys** page in the API section of the control panel, not the DigitalOcean API token, and `<region>` is the Spaces region slug such as `nyc3`.
+
+            If the bucket does not need a policy at all, delete it:
+
+            ```bash
+            AWS_ACCESS_KEY_ID=<spaces-key> AWS_SECRET_ACCESS_KEY=<spaces-secret> \
+              aws s3api delete-bucket-policy --bucket <bucket> \
+                --endpoint-url https://<region>.digitaloceanspaces.com
+            ```
+
+            If a policy is required, re-apply it with each statement's `Principal` scoped to specific account or Spaces-key identities instead of `"*"`:
+
+            ```bash
+            AWS_ACCESS_KEY_ID=<spaces-key> AWS_SECRET_ACCESS_KEY=<spaces-secret> \
+              aws s3api put-bucket-policy --bucket <bucket> \
+                --endpoint-url https://<region>.digitaloceanspaces.com \
+                --policy file://scoped-policy.json
+            ```
+        # No Terraform remediation: the bucket policy lives in a separate digitalocean_spaces_bucket_policy resource holding a free-form JSON document; an HCL snippet cannot assert that an arbitrary bucket's policy omits a wildcard principal.
+    refs:
+      - url: https://docs.digitalocean.com/products/spaces/reference/s3-compatibility/
+        title: Spaces S3 compatibility reference
+
+  # No Terraform variants: MFA delete is enabled through the S3-compatible
+  # PutBucketVersioning call with an MFA serial and code; the digitalocean_spaces_bucket
+  # resource has no argument for it, so there is no HCL surface to inspect.
+  - uid: mondoo-digitalocean-security-spaces-bucket-mfa-delete-enabled
+    title: Ensure Spaces buckets require MFA to delete object versions
+    impact: 50
+    filters: asset.platform == "digitalocean-spaces-bucket"
+    tags:
+      compliance/bsi-sys-1-5: false
+      compliance/csa-cloud-controls-matrix-4: cloud-controls-matrix-4-bcr-08
+      compliance/dora: dora-art-12
+      compliance/hipaa: hipaa-security-ss164-308-a-7-ii-a-contingency-plan-data-backup-plan
+      compliance/iso-27001-2022: iso-27001-2022-a-8-13
+      compliance/nis-2: nis-2-21-2-c
+      compliance/nist-csf-1: nist-csf-1-pr-ds-1
+      compliance/nist-csf-2: nist-csf-2-pr-ds-01
+      compliance/nist-sp-800-53-rev5: nist-sp-800-53-rev5-cp-9
+      compliance/nist-sp-800-171: false
+      compliance/pci-dss-4: false
+      compliance/soc2-2017: soc2-control-cc9-1-1
+      compliance/vda-isa-5: false
+    mql: |
+      digitalocean.spacesBucket.mfaDeleteEnabled == true
+    docs:
+      desc: |
+        This check ensures that every Spaces bucket requires multi-factor authentication to permanently delete object versions or to suspend versioning. MFA delete hardens a versioned bucket so that a leaked or compromised access key alone cannot erase the retained version history that versioning is meant to protect.
+
+        **Why this matters**
+
+        - **Tamper resistance for backups:** Object versioning preserves prior revisions, but without MFA delete a single compromised key can still issue per-version deletes; MFA delete forces a second factor before any version is permanently removed.
+        - **Ransomware and insider resilience:** Requiring an MFA code to delete versions or disable versioning closes the path by which an attacker with stolen credentials destroys the recovery copies before exfiltration or extortion.
+        - **Defense in depth for retention:** MFA delete complements versioning and lifecycle retention, ensuring the controls that guarantee recoverability cannot be silently undone with key access alone.
+
+        **Risk mitigation**
+
+        - **Protected version history:** With MFA delete enabled, the version history remains available for recovery even if a write-capable key is compromised.
+        - **Higher bar for destructive actions:** The second factor requirement means permanently destructive operations require interactive, authenticated action rather than an automated API call with a leaked key.
+      audit: |
+        ### Audit via Console
+
+        1. Sign in to the DigitalOcean [Cloud Control Panel](https://cloud.digitalocean.com/).
+        2. Spaces does not surface MFA delete state in the panel; inspect it with the S3-compatible API in the CLI step below.
+
+        ### Audit via CLI
+
+        1. Query the bucket's versioning configuration, which reports the MFA delete state:
+
+        ```bash
+        AWS_ACCESS_KEY_ID=<spaces-key> AWS_SECRET_ACCESS_KEY=<spaces-secret> \
+          aws s3api get-bucket-versioning --bucket <bucket> \
+            --endpoint-url https://<region>.digitaloceanspaces.com
+        ```
+
+        A passing bucket returns `"MFADelete": "Enabled"`. A failing bucket returns `"MFADelete": "Disabled"` or omits the field.
+      remediation:
+        - id: console
+          desc: |
+            MFA delete cannot be configured from the Cloud Control Panel; it is set through the S3-compatible API using the root account's MFA device, as shown in the CLI remediation below.
+        - id: cli
+          desc: |
+            MFA delete is enabled through the S3-compatible `PutBucketVersioning` call and requires the serial number of the account's MFA device together with the current code. The `<spaces-key>` and `<spaces-secret>` come from the **Spaces Keys** page, and `<region>` is the Spaces region slug such as `nyc3`.
+
+            ```bash
+            AWS_ACCESS_KEY_ID=<spaces-key> AWS_SECRET_ACCESS_KEY=<spaces-secret> \
+              aws s3api put-bucket-versioning --bucket <bucket> \
+                --versioning-configuration Status=Enabled,MFADelete=Enabled \
+                --mfa "<mfa-serial> <mfa-code>" \
+                --endpoint-url https://<region>.digitaloceanspaces.com
+            ```
+
+            Versioning must be enabled for MFA delete to apply. Verify the new state with `aws s3api get-bucket-versioning`.
+        # No Terraform remediation: MFA delete requires an interactive MFA serial and code on the PutBucketVersioning call; the digitalocean_spaces_bucket resource models no such argument, so there is no Terraform analog.
+    refs:
+      - url: https://docs.digitalocean.com/products/spaces/reference/s3-compatibility/
+        title: Spaces S3 compatibility reference
+
+  - uid: mondoo-digitalocean-security-spaces-bucket-cors-no-wildcard-origin
+    title: Ensure Spaces bucket CORS rules do not allow all origins
+    impact: 50
+    tags:
+      compliance/bsi-sys-1-5: false
+      compliance/csa-cloud-controls-matrix-4: cloud-controls-matrix-4-iam-05
+      compliance/dora: dora-art-9
+      compliance/hipaa: hipaa-security-ss164-312-a-1-access-control
+      compliance/iso-27001-2022: iso-27001-2022-a-8-3
+      compliance/nis-2: nis-2-21-2-i
+      compliance/nist-csf-1: nist-csf-1-pr-ac-4
+      compliance/nist-csf-2: nist-csf-2-pr-aa-05
+      compliance/nist-sp-800-53-rev5: nist-sp-800-53-rev5-ac-3
+      compliance/nist-sp-800-171: nist-sp-800-171--3-1-1
+      compliance/pci-dss-4: pcidss-requirement-7-2-1
+      compliance/soc2-2017: soc2-control-cc6-1-3
+      compliance/vda-isa-5: vda-isa-5-4-2-1
+    variants:
+      - uid: mondoo-digitalocean-security-spaces-bucket-cors-no-wildcard-origin-digitalocean
+        tags:
+          mondoo.com/filter-title: DigitalOcean
+          mondoo.com/filter-icon: digitalocean
+      - uid: mondoo-digitalocean-security-spaces-bucket-cors-no-wildcard-origin-terraform-hcl
+        tags:
+          mondoo.com/filter-title: Terraform HCL
+          mondoo.com/filter-icon: terraform
+      - uid: mondoo-digitalocean-security-spaces-bucket-cors-no-wildcard-origin-terraform-plan
+        tags:
+          mondoo.com/filter-title: Terraform Plan
+          mondoo.com/filter-icon: terraform
+      - uid: mondoo-digitalocean-security-spaces-bucket-cors-no-wildcard-origin-terraform-state
+        tags:
+          mondoo.com/filter-title: Terraform State
+          mondoo.com/filter-icon: terraform
+    docs:
+      desc: |
+        This check ensures that no Spaces bucket has a CORS rule whose allowed origins include the wildcard `"*"`. A wildcard origin lets any website instruct a visitor's browser to issue cross-origin requests against the bucket, weakening the same-origin protections that normally isolate web applications from each other.
+
+        **Why this matters**
+
+        - **Cross-origin data reach:** A `"*"` allowed origin permits scripts on any site to read responses from the bucket in the browser context, which can expose objects intended only for a specific application's front end.
+        - **Credentialed request risk:** Combined with permissive methods, a wildcard origin broadens the set of sites that can drive authenticated browser requests against the bucket, expanding the surface for cross-site abuse.
+        - **Overly broad by default:** Wildcard origins are frequently copied from quick-start examples and left in place, granting far wider browser access than the single front-end domain the bucket actually serves.
+
+        **Risk mitigation**
+
+        - **Origin allowlisting:** Restricting allowed origins to the specific scheme-and-host front ends that need browser access confines cross-origin requests to trusted applications.
+        - **Least-privilege CORS:** Pairing a narrow origin list with only the required methods and headers keeps the bucket's browser-accessible surface limited to its intended use.
+      audit: |
+        ### Audit via Console
+
+        1. Sign in to the DigitalOcean [Cloud Control Panel](https://cloud.digitalocean.com/).
+        2. Open the affected bucket under **Spaces Object Storage**.
+        3. On the **Settings** tab, review the **CORS Configurations** and check whether any rule's **Origin** is `*`.
+
+        A passing bucket has no CORS rule with a `*` origin. A failing bucket has at least one CORS rule whose allowed origin is `*`.
+
+        ### Audit via CLI
+
+        1. Retrieve the bucket CORS configuration with the S3-compatible API:
+
+        ```bash
+        AWS_ACCESS_KEY_ID=<spaces-key> AWS_SECRET_ACCESS_KEY=<spaces-secret> \
+          aws s3api get-bucket-cors --bucket <bucket> \
+            --endpoint-url https://<region>.digitaloceanspaces.com
+        ```
+
+        A passing bucket returns no rule with `"AllowedOrigins": ["*"]`. A failing bucket returns at least one rule whose `AllowedOrigins` contains `*`.
+      remediation:
+        - id: console
+          desc: |
+            To fix this in the DigitalOcean Cloud Control Panel:
+
+            1. Open the bucket under **Spaces Object Storage** and go to the **Settings** tab.
+            2. Edit each CORS configuration whose **Origin** is `*` and replace it with the specific scheme-and-host origins that need browser access, for example `https://app.example.com`.
+            3. Save the configuration.
+        - id: cli
+          desc: |
+            DigitalOcean Spaces is S3-compatible, so manage CORS with the AWS CLI pointed at the Spaces endpoint. The `<spaces-key>` and `<spaces-secret>` come from the **Spaces Keys** page, and `<region>` is the Spaces region slug such as `nyc3`. Re-apply the CORS configuration with explicit origins instead of `*`:
+
+            ```bash
+            AWS_ACCESS_KEY_ID=<spaces-key> AWS_SECRET_ACCESS_KEY=<spaces-secret> \
+              aws s3api put-bucket-cors --bucket <bucket> \
+                --endpoint-url https://<region>.digitaloceanspaces.com \
+                --cors-configuration '{
+                  "CORSRules": [{
+                    "AllowedOrigins": ["https://app.example.com"],
+                    "AllowedMethods": ["GET"],
+                    "AllowedHeaders": ["*"]
+                  }]
+                }'
+            ```
+        - id: terraform
+          desc: |
+            To scope CORS in Terraform, set `allowed_origins` on each `cors_rule` block of `digitalocean_spaces_bucket` to specific origins instead of `*`:
+
+            ```hcl
+            resource "digitalocean_spaces_bucket" "example" {
+              name   = "example-bucket"
+              region = "nyc3"
+              acl    = "private"
+
+              cors_rule {
+                allowed_origins = ["https://app.example.com"]
+                allowed_methods = ["GET"]
+                allowed_headers = ["*"]
+                max_age_seconds = 3000
+              }
+            }
+            ```
+    refs:
+      - url: https://docs.digitalocean.com/products/spaces/reference/s3-compatibility/
+        title: Spaces S3 compatibility reference
+
+  - uid: mondoo-digitalocean-security-spaces-bucket-cors-no-wildcard-origin-digitalocean
+    filters: asset.platform == "digitalocean-spaces-bucket"
+    mql: |
+      digitalocean.spacesBucket.corsRules.none(_["allowedOrigins"].contains("*"))
+  - uid: mondoo-digitalocean-security-spaces-bucket-cors-no-wildcard-origin-terraform-hcl
+    filters: asset.platform == "terraform-hcl" && terraform.resources.contains(nameLabel == "digitalocean_spaces_bucket")
+    mql: |
+      terraform.resources("digitalocean_spaces_bucket").all(
+        blocks.where(type == "cors_rule").none(arguments["allowed_origins"].contains("*"))
+      )
+  - uid: mondoo-digitalocean-security-spaces-bucket-cors-no-wildcard-origin-terraform-plan
+    filters: asset.platform == "terraform-plan" && terraform.plan.resourceChanges.contains(type == "digitalocean_spaces_bucket")
+    mql: |
+      terraform.plan.resourceChanges.where(type == "digitalocean_spaces_bucket").all(
+        change.after["cors_rule"] == empty ||
+        change.after["cors_rule"].none(_["allowed_origins"].contains("*"))
+      )
+  - uid: mondoo-digitalocean-security-spaces-bucket-cors-no-wildcard-origin-terraform-state
+    filters: asset.platform == "terraform-state" && terraform.state.resources.contains(type == "digitalocean_spaces_bucket")
+    mql: |
+      terraform.state.resources.where(type == "digitalocean_spaces_bucket").all(
+        values["cors_rule"] == empty ||
+        values["cors_rule"].none(_["allowed_origins"].contains("*"))
+      )
 
   # No Terraform variants: this check inspects the scheme of each app's live_url,
   # which is a read-only computed attribute. App Platform always provisions managed
@@ -3116,6 +4017,80 @@ queries:
     refs:
       - url: https://docs.digitalocean.com/products/gradientai-platform/
         title: DigitalOcean GradientAI platform
+  # No Terraform variants: GradientAI agents are managed through the GradientAI API and control
+  # panel; the digitalocean Terraform provider has no resource representing an agent or its
+  # attached guardrails, so there is nothing to assert in HCL, plan, or state.
+  - uid: mondoo-digitalocean-security-gradientai-agent-has-guardrails
+    title: Ensure GradientAI agents have a content guardrail attached
+    impact: 60
+    tags:
+      compliance/bsi-sys-1-5: false
+      compliance/csa-cloud-controls-matrix-4: false
+      compliance/dora: false
+      compliance/hipaa: false
+      compliance/iso-27001-2022: false
+      compliance/nis-2: false
+      compliance/nist-csf-1: false
+      compliance/nist-csf-2: false
+      compliance/nist-sp-800-53-rev5: false
+      compliance/nist-sp-800-171: false
+      compliance/pci-dss-4: false
+      compliance/soc2-2017: false
+      compliance/vda-isa-5: false
+    mql: |
+      digitalocean.gradientai.agents.all(guardrails.where(isAttached == true).length > 0)
+    docs:
+      desc: |
+        This check ensures that every GradientAI agent has at least one content guardrail attached. Guardrails inspect the prompts an agent receives and the responses it returns, blocking content that violates the configured policy and returning a canned response instead. An agent with no attached guardrail applies no content filtering to its inputs or outputs.
+
+        **Why this matters**
+
+        - **Prompt-injection resistance:** A guardrail can intercept adversarial prompts that attempt to override the agent's instructions or extract its system prompt and connected data.
+        - **Output safety:** Guardrails keep an agent from returning sensitive, unsafe, or policy-violating content to its users.
+        - **Consistent enforcement:** Attaching a guardrail enforces content policy at the platform layer rather than relying on the agent's instruction text alone, which a determined user can work around.
+
+        **Risk mitigation**
+
+        - **Data leakage:** A guardrail reduces the chance that an agent grounded on private knowledge bases discloses that content in response to a crafted prompt.
+        - **Abuse:** Filtering inputs and outputs limits how an exposed agent can be misused for harmful generation.
+
+        Agents that are intentionally unfiltered for a trusted internal audience can be exempted from this check.
+      audit: |
+        ### Audit via Console
+
+        1. Sign in to the DigitalOcean [Cloud Control Panel](https://cloud.digitalocean.com/).
+        2. Open the **GradientAI** platform and select each agent.
+        3. Review the agent's **Guardrails** configuration.
+
+        A passing account has every agent with at least one attached guardrail. A failing account has one or more agents with no guardrail attached.
+
+        ### Audit via CLI
+
+        1. List the GradientAI agents and review their attached guardrails:
+
+        ```bash
+        doctl genai agent list --output json | jq -r '.[] | [.name, .uuid, ([.guardrails[]? | select(.is_attached)] | length)] | @tsv'
+        ```
+
+        A passing account returns an attached-guardrail count of at least 1 for every agent. A failing account returns `0` for one or more agents.
+      remediation:
+        - id: console
+          desc: |
+            To attach a content guardrail using the DigitalOcean Cloud Control Panel:
+
+            1. Sign in to the DigitalOcean [Cloud Control Panel](https://cloud.digitalocean.com/).
+            2. Open the **GradientAI** platform and select the agent.
+            3. Open the **Guardrails** configuration, attach an appropriate guardrail, and set its default response.
+            4. Redeploy the agent so the guardrail takes effect.
+        # No CLI remediation: doctl genai exposes agent lifecycle operations but no command to
+        # attach a guardrail to an agent; guardrail attachment is performed through the GradientAI
+        # control panel or the GradientAI API.
+        # No Terraform remediation: GradientAI agents have no digitalocean Terraform resource, so
+        # guardrail attachment cannot be expressed in Terraform.
+    refs:
+      - url: https://docs.digitalocean.com/products/gradientai-platform/
+        title: DigitalOcean GradientAI platform
+
   # No Terraform variants: GradientAI knowledge bases are managed through the GradientAI
   # API and control panel; the digitalocean Terraform provider has no resource representing
   # a knowledge base or its public flag, so there is nothing to assert in HCL, plan, or state.
