@@ -1,0 +1,1282 @@
+# Copyright Mondoo, Inc. 2024, 2026
+# SPDX-License-Identifier: BUSL-1.1
+policies:
+  - uid: mondoo-stackit-security
+    name: Mondoo STACKIT Security
+    version: 1.1.0
+    license: BUSL-1.1
+    tags:
+      mondoo.com/category: security
+      mondoo.com/platform: stackit,cloud
+    require:
+      - provider: stackit
+    authors:
+      - name: Mondoo, Inc.
+        email: hello@mondoo.com
+    summary: Secure STACKIT compute, storage, databases, networking, and IAM
+    docs:
+      desc: |
+        The Mondoo STACKIT Security policy identifies critical misconfigurations that could leave your STACKIT projects vulnerable to attackers. It helps organizations detect and remediate security risks before they can be exploited, reducing the likelihood of unauthorized access, data breaches, and operational disruptions.
+
+        The policy runs directly against a STACKIT project and provides security checks across these services:
+
+        - **Compute** — servers attached to security groups, block storage volume encryption
+        - **Networking** — security groups (no public SSH/RDP/all-ports ingress), application load balancers
+        - **Object Storage** — S3-compatible buckets (Object Lock and retention)
+        - **File Storage (SFS)** — resource pool and NFS export-policy access controls, snapshot policy
+        - **Managed Databases** — PostgreSQL Flex, MongoDB Flex, SQLServer Flex (network exposure, backups, high availability)
+        - **Secrets Manager** — network exposure
+        - **Identity & Access** — service account key and access-token expiry
+        - **Key Management (KMS)** — key lifecycle and health
+        - **Kubernetes Engine (SKE)** — cluster health and version auto-update
+        - **Telemetry Router** and **AI Model Serving** — access-token lifecycle
+
+        ## Scope and design
+
+        The checks focus on controls an operator **can misconfigure** — network exposure, access-control lists, credential expiry, backups, and high availability. Where STACKIT enforces a control by default and exposes no setting to weaken it — for example mandatory **TLS 1.3** in transit and always-on **AES-256 encryption at rest** for managed databases and storage — the policy intentionally does not add a check, because there is no insecure state to detect. Per-group notes call out these platform guarantees so a passing scan is not mistaken for missing coverage.
+
+        If you have questions, reach out to Mondoo at hello@mondoo.com.
+    groups:
+      - title: STACKIT Compute
+        checks:
+          - uid: mondoo-stackit-security-compute-server-has-security-group
+          - uid: mondoo-stackit-security-compute-volume-encrypted
+      - title: STACKIT Networking
+        checks:
+          - uid: mondoo-stackit-security-network-no-public-ssh
+          - uid: mondoo-stackit-security-network-no-public-rdp
+          - uid: mondoo-stackit-security-network-no-unrestricted-ingress
+          - uid: mondoo-stackit-security-network-alb-target-security-groups
+      - title: STACKIT Object Storage
+        checks:
+          - uid: mondoo-stackit-security-objectstorage-bucket-object-lock
+          - uid: mondoo-stackit-security-objectstorage-bucket-retention
+      - title: STACKIT File Storage
+        checks:
+          - uid: mondoo-stackit-security-sfs-resourcepool-restricted-ipacl
+          - uid: mondoo-stackit-security-sfs-export-policy-restricted
+          - uid: mondoo-stackit-security-sfs-resourcepool-snapshot-policy
+      - title: STACKIT Managed Databases
+        docs:
+          desc: |
+            These checks cover the STACKIT managed-database engines (PostgreSQL Flex, MongoDB Flex, and SQLServer Flex).
+
+            **Why encryption and TLS are not checked here**
+
+            Several controls that are configurable (and therefore checkable) on other clouds are *platform guarantees* on STACKIT, not user-tunable settings — so there is no insecure state to detect, and a check would always pass:
+
+            - **Encryption in transit:** Connections are always encrypted with TLS 1.3 and signed certificates; unencrypted access is not possible.
+            - **Encryption at rest:** Instance storage and backup storage are encrypted system-side with AES-256 by default.
+            - **Automated backups:** The full instance is backed up automatically, and deletion is delayed (soft-delete) before permanent removal.
+
+            These checks therefore focus on what an operator *can* misconfigure: network exposure (the access-control list), whether a backup schedule is set, and high availability (replica count).
+        checks:
+          - uid: mondoo-stackit-security-db-postgres-acl-restricted
+          - uid: mondoo-stackit-security-db-postgres-backups
+          - uid: mondoo-stackit-security-db-mongodb-acl-restricted
+          - uid: mondoo-stackit-security-db-mongodb-backups
+          - uid: mondoo-stackit-security-db-sqlserver-acl-restricted
+          - uid: mondoo-stackit-security-db-sqlserver-backups
+          - uid: mondoo-stackit-security-db-postgres-high-availability
+          - uid: mondoo-stackit-security-db-mongodb-high-availability
+          - uid: mondoo-stackit-security-db-sqlserver-high-availability
+      - title: STACKIT Secrets Manager
+        checks:
+          - uid: mondoo-stackit-security-secretsmanager-acl-restricted
+      - title: STACKIT Identity & Access
+        checks:
+          - uid: mondoo-stackit-security-serviceaccount-key-bounded-validity
+          - uid: mondoo-stackit-security-serviceaccount-token-bounded-validity
+      - title: STACKIT Key Management
+        checks:
+          - uid: mondoo-stackit-security-kms-key-not-pending-deletion
+          - uid: mondoo-stackit-security-kms-key-healthy-state
+      - title: STACKIT Kubernetes (SKE)
+        checks:
+          - uid: mondoo-stackit-security-ske-cluster-healthy
+          - uid: mondoo-stackit-security-ske-cluster-auto-update
+          - uid: mondoo-stackit-security-ske-apiserver-acl-enabled
+          - uid: mondoo-stackit-security-ske-apiserver-acl-restricted
+      - title: STACKIT Telemetry
+        checks:
+          - uid: mondoo-stackit-security-telemetry-token-expiry-set
+          - uid: mondoo-stackit-security-telemetry-token-not-expired
+      - title: STACKIT Model Serving
+        checks:
+          - uid: mondoo-stackit-security-modelserving-token-expiry-set
+          - uid: mondoo-stackit-security-modelserving-token-not-expired
+queries:
+  # ----------------------------- STACKIT Compute -----------------------------
+  - uid: mondoo-stackit-security-compute-server-has-security-group
+    title: Ensure STACKIT servers are attached to a security group
+    impact: 60
+    filters: asset.platform == "stackit-server"
+    mql: |
+      stackit.server.securityGroups.length > 0
+    docs:
+      desc: |
+        This check ensures that every STACKIT compute server is associated with at least one security group. Security groups are the primary mechanism for controlling inbound and outbound network traffic to a server; a server with no security group attached has no stateful network filtering applied at the instance level.
+
+        **Why this matters**
+
+        - **No instance-level filtering:** Without a security group, the server relies entirely on network-level controls, increasing the chance of unintended exposure.
+        - **Inconsistent posture:** Servers missing a security group are easy to overlook in audits and drift from the project's intended baseline.
+      remediation:
+        - id: console
+          desc: |
+            In the STACKIT Portal, open **Compute Engine** > **Servers**, select the server, and attach an appropriate security group under its network settings.
+        - id: terraform
+          desc: |
+            Attach a security group to the server's network interface so instance-level filtering applies. With the `stackit` Terraform provider, set `security_group_ids` on a `stackit_network_interface` and reference that interface from the server:
+
+            ```hcl
+            resource "stackit_security_group" "example" {
+              project_id = var.project_id
+              name       = "example-sg"
+              stateful   = true
+            }
+
+            resource "stackit_network_interface" "example" {
+              project_id         = var.project_id
+              network_id         = var.network_id
+              security_group_ids = [stackit_security_group.example.security_group_id]
+            }
+
+            resource "stackit_server" "example" {
+              project_id   = var.project_id
+              name         = "example-server"
+              machine_type = "g2i.1"
+              boot_volume = {
+                size        = 64
+                source_type = "image"
+                source_id   = var.image_id
+              }
+              network_interfaces = [stackit_network_interface.example.network_interface_id]
+            }
+            ```
+    refs:
+      - url: https://docs.stackit.cloud/products/network/network-security/
+        title: STACKIT Documentation - Security Groups
+  - uid: mondoo-stackit-security-compute-volume-encrypted
+    title: Ensure STACKIT block storage volumes are encrypted
+    impact: 80
+    filters: asset.platform == "stackit-project"
+    mql: |
+      stackit.volumes.all(encrypted == true)
+    docs:
+      desc: |
+        This check ensures that all STACKIT block storage volumes are encrypted at rest. Encryption at rest protects the confidentiality of data stored on a volume if the underlying physical media is accessed outside of the normal service boundary.
+
+        **Why this matters**
+
+        - **Data confidentiality:** Encryption protects sensitive data on the volume from disclosure if storage media is decommissioned or accessed improperly.
+        - **Compliance:** Many frameworks require encryption of data at rest for regulated workloads.
+      remediation:
+        - id: console
+          desc: |
+            Volume encryption is configured at creation time. For an unencrypted volume, create a new encrypted volume and migrate the data, then detach and delete the unencrypted volume.
+        - id: terraform
+          desc: |
+            Create the volume with customer-managed encryption by supplying `encryption_parameters` (a STACKIT KMS key) on the `stackit_volume` resource. Encryption is set at creation, so migrate data from any unencrypted volume to a new encrypted one:
+
+            ```hcl
+            resource "stackit_volume" "example" {
+              project_id        = var.project_id
+              name              = "encrypted-volume"
+              size              = 64
+              availability_zone = "eu01-1"
+              encryption_parameters = {
+                kek_keyring_id  = var.kms_keyring_id
+                kek_key_id      = var.kms_key_id
+                kek_key_version = 1
+                service_account = var.kms_service_account
+              }
+            }
+            ```
+    refs:
+      - url: https://docs.stackit.cloud/products/storage/block-storage/
+        title: STACKIT Documentation - Block Storage
+  # ----------------------------- STACKIT Networking -----------------------------
+  - uid: mondoo-stackit-security-network-no-public-ssh
+    title: Ensure no security group exposes SSH (port 22) to the internet
+    impact: 90
+    filters: asset.platform == "stackit-project"
+    mql: |
+      stackit.securityGroups.all(rules.where(direction == "ingress" && portRangeMin <= 22 && portRangeMax >= 22).none(ipRange == "0.0.0.0/0" || ipRange == "::/0"))
+    docs:
+      desc: |
+        This check ensures that no security group rule permits inbound SSH (TCP port 22) from the entire internet (`0.0.0.0/0` or `::/0`). SSH grants interactive shell access; exposing it to the world dramatically increases the risk of brute-force and credential-stuffing attacks.
+
+        **Why this matters**
+
+        - **Direct administrative exposure:** A world-open SSH port is continuously scanned and attacked across the internet.
+        - **Credential risk:** Exposed SSH endpoints are a primary target for password-guessing and key-compromise attacks.
+      remediation:
+        - id: console
+          desc: |
+            In the STACKIT Portal, edit the offending security group rule and restrict the SSH source CIDR to a bastion host, VPN range, or specific administrative network instead of `0.0.0.0/0`.
+        - id: terraform
+          desc: |
+            Define the SSH ingress rule with a restricted `ip_range` (a bastion or admin CIDR) instead of `0.0.0.0/0` on the `stackit_security_group_rule` resource:
+
+            ```hcl
+            resource "stackit_security_group_rule" "ssh_restricted" {
+              project_id        = var.project_id
+              security_group_id = var.security_group_id
+              direction         = "ingress"
+              ether_type        = "IPv4"
+              ip_range          = "10.0.0.0/8" # restrict to a bastion/admin range, not 0.0.0.0/0
+              protocol = {
+                name = "tcp"
+              }
+              port_range = {
+                min = 22
+                max = 22
+              }
+            }
+            ```
+    refs:
+      - url: https://docs.stackit.cloud/products/network/network-security/
+        title: STACKIT Documentation - Security Groups
+  - uid: mondoo-stackit-security-network-no-public-rdp
+    title: Ensure no security group exposes RDP (port 3389) to the internet
+    impact: 90
+    filters: asset.platform == "stackit-project"
+    mql: |
+      stackit.securityGroups.all(rules.where(direction == "ingress" && portRangeMin <= 3389 && portRangeMax >= 3389).none(ipRange == "0.0.0.0/0" || ipRange == "::/0"))
+    docs:
+      desc: |
+        This check ensures that no security group rule permits inbound RDP (TCP port 3389) from the entire internet (`0.0.0.0/0` or `::/0`). RDP provides remote desktop access to Windows servers and is a frequent target of automated attacks and ransomware campaigns when exposed publicly.
+
+        **Why this matters**
+
+        - **Remote desktop exposure:** Publicly reachable RDP is aggressively scanned and exploited.
+        - **Ransomware vector:** Internet-facing RDP is one of the most common initial-access vectors for ransomware.
+      remediation:
+        - id: console
+          desc: |
+            In the STACKIT Portal, edit the offending security group rule and restrict the RDP source CIDR to a bastion host or VPN range instead of `0.0.0.0/0`.
+        - id: terraform
+          desc: |
+            Define the RDP ingress rule with a restricted `ip_range` (a bastion or admin CIDR) instead of `0.0.0.0/0` on the `stackit_security_group_rule` resource:
+
+            ```hcl
+            resource "stackit_security_group_rule" "rdp_restricted" {
+              project_id        = var.project_id
+              security_group_id = var.security_group_id
+              direction         = "ingress"
+              ether_type        = "IPv4"
+              ip_range          = "10.0.0.0/8" # restrict to a bastion/admin range, not 0.0.0.0/0
+              protocol = {
+                name = "tcp"
+              }
+              port_range = {
+                min = 3389
+                max = 3389
+              }
+            }
+            ```
+    refs:
+      - url: https://docs.stackit.cloud/products/network/network-security/
+        title: STACKIT Documentation - Security Groups
+  - uid: mondoo-stackit-security-network-no-unrestricted-ingress
+    title: Ensure no security group exposes all ports to the internet
+    impact: 85
+    filters: asset.platform == "stackit-project"
+    mql: |
+      stackit.securityGroups.all(rules.where(direction == "ingress").where(ipRange == "0.0.0.0/0" || ipRange == "::/0").where(portRangeMin == null || portRangeMin <= 1).none(portRangeMax == null || portRangeMax >= 65535))
+    docs:
+      desc: |
+        This check ensures that no security group rule permits inbound traffic on all ports from the entire internet (`0.0.0.0/0` or `::/0`). A rule that opens the full port range to the world exposes every service running on attached servers, including those never intended to be reachable externally.
+
+        **Why this matters**
+
+        - **Broad attack surface:** An all-ports world-open rule exposes every listening service, including management and database ports.
+        - **Defeats segmentation:** Such a rule negates the benefit of fine-grained network controls.
+      remediation:
+        - id: console
+          desc: |
+            In the STACKIT Portal, replace the broad rule with specific rules that open only the required ports to the smallest necessary source CIDRs.
+        - id: terraform
+          desc: |
+            Replace any all-ports world-open rule with `stackit_security_group_rule` resources that scope each rule to a specific `port_range` and a restricted `ip_range`:
+
+            ```hcl
+            resource "stackit_security_group_rule" "https_restricted" {
+              project_id        = var.project_id
+              security_group_id = var.security_group_id
+              direction         = "ingress"
+              ether_type        = "IPv4"
+              ip_range          = "10.0.0.0/8" # restrict to the smallest necessary CIDR, not 0.0.0.0/0
+              protocol = {
+                name = "tcp"
+              }
+              port_range = {
+                min = 443 # open only the required port(s), not the full range
+                max = 443
+              }
+            }
+            ```
+    refs:
+      - url: https://docs.stackit.cloud/products/network/network-security/
+        title: STACKIT Documentation - Security Groups
+  - uid: mondoo-stackit-security-network-alb-target-security-groups
+    title: Ensure STACKIT application load balancers assign target security groups
+    impact: 60
+    filters: asset.platform == "stackit-project"
+    mql: |
+      stackit.albLoadBalancers.all(disableTargetSecurityGroupAssignment == false)
+    docs:
+      desc: |
+        This check ensures that STACKIT application load balancers (ALBs) do not disable automatic target security group assignment. When this assignment is disabled, the load balancer's targets are not automatically protected by the managed security group, which can leave backend servers reachable from unintended sources.
+
+        **Why this matters**
+
+        - **Backend exposure:** Without the target security group, backend servers may be reachable outside the intended load-balancer path.
+        - **Posture drift:** Disabling managed assignment shifts responsibility to manual rules that are easy to misconfigure.
+      remediation:
+        - id: console
+          desc: |
+            In the STACKIT Portal, edit the application load balancer and re-enable target security group assignment, or manually ensure the targets are protected by an equivalent security group.
+        - id: terraform
+          desc: |
+            Keep automatic target security group assignment enabled by setting `disable_target_security_group_assignment = false` (the secure value) on the `stackit_application_load_balancer` resource:
+
+            ```hcl
+            resource "stackit_application_load_balancer" "example" {
+              project_id = var.project_id
+              region     = "eu01"
+              name       = "example-alb"
+              plan_id    = "p10"
+
+              # ... listeners, networks, and target_pools as required ...
+
+              disable_target_security_group_assignment = false
+            }
+            ```
+    refs:
+      - url: https://docs.stackit.cloud/products/network/load-balancing-and-content-delivery/application-load-balancer/
+        title: STACKIT Documentation - Application Load Balancer
+  # ----------------------------- STACKIT Object Storage -----------------------------
+  - uid: mondoo-stackit-security-objectstorage-bucket-object-lock
+    title: Ensure STACKIT Object Storage buckets have Object Lock enabled
+    impact: 70
+    filters: asset.platform == "stackit-object-storage-bucket"
+    mql: |
+      stackit.objectStorage.bucket.objectLockEnabled == true
+    docs:
+      desc: |
+        This check ensures that STACKIT Object Storage buckets have Object Lock (write-once-read-many, WORM) enabled. Object Lock protects objects from being overwritten or deleted for a defined retention period, which is important for compliance, ransomware resilience, and audit-log integrity.
+
+        **Why this matters**
+
+        - **Ransomware resilience:** WORM-protected objects cannot be encrypted or deleted by an attacker who gains write access.
+        - **Tamper-evidence:** Retained objects support reliable forensic and compliance evidence.
+
+        Note: Object Lock must be enabled at bucket creation. Apply this check to buckets that store audit logs, backups, or regulated data.
+      remediation:
+        - id: console
+          desc: |
+            Object Lock is set when a bucket is created. For an existing bucket without Object Lock, create a new bucket with Object Lock enabled and migrate the objects.
+        - id: terraform
+          desc: |
+            Create the bucket with `object_lock = true` on the `stackit_objectstorage_bucket` resource. Object Lock can only be set at creation, so migrate objects from any non-locked bucket:
+
+            ```hcl
+            resource "stackit_objectstorage_bucket" "example" {
+              project_id  = var.project_id
+              name        = "secure-bucket"
+              object_lock = true
+            }
+            ```
+    refs:
+      - url: https://docs.stackit.cloud/products/storage/object-storage/
+        title: STACKIT Documentation - Object Storage
+  - uid: mondoo-stackit-security-objectstorage-bucket-retention
+    title: Ensure Object-Locked buckets define a default retention period
+    impact: 60
+    filters: asset.platform == "stackit-object-storage-bucket"
+    mql: |
+      stackit.objectStorage.bucket.objectLockEnabled == false || stackit.objectStorage.bucket.defaultRetentionDays > 0
+    docs:
+      desc: |
+        This check ensures that STACKIT Object Storage buckets which have Object Lock enabled also define a default retention period greater than zero. Object Lock without a default retention leaves new objects unprotected unless retention is set per-object, which is easy to miss.
+
+        **Why this matters**
+
+        - **Consistent protection:** A default retention guarantees every new object is WORM-protected without relying on per-object configuration.
+        - **Operational safety:** Reduces the chance of objects being deletable due to a forgotten retention setting.
+      remediation:
+        - id: console
+          desc: |
+            In the STACKIT Portal, configure a default retention period (in days) and mode for the Object-Locked bucket so new objects inherit WORM protection.
+        # No Terraform remediation: the stackit Terraform provider exposes the bucket's retention only as the read-only `max_retention_days` attribute (on stackit_objectstorage_bucket / stackit_objectstorage_compliance_lock); there is no writable attribute to set a default retention period. Configure it via the console or API.
+    refs:
+      - url: https://docs.stackit.cloud/products/storage/object-storage/
+        title: STACKIT Documentation - Object Storage
+  # ----------------------------- STACKIT File Storage -----------------------------
+  - uid: mondoo-stackit-security-sfs-resourcepool-restricted-ipacl
+    title: Ensure STACKIT SFS resource pools restrict their mount IP allow-list
+    impact: 85
+    filters: asset.platform == "stackit-project"
+    mql: |
+      stackit.sfs.resourcePools.all(ipAcl.none(_ == "0.0.0.0/0" || _ == "::/0"))
+    docs:
+      desc: |
+        This check ensures that STACKIT File Storage (SFS) resource pools do not allow mounting from the entire internet (`0.0.0.0/0` or `::/0`) via their IP allow-list (`ipAcl`). NFS shares hosted in a pool that is mountable from anywhere expose file data to any host that can reach the endpoint.
+
+        **Why this matters**
+
+        - **Unauthenticated file access:** NFS typically relies on network reachability for access control; a world-open allow-list exposes the file data broadly.
+        - **Data exfiltration risk:** Any reachable host could mount and read or write share contents.
+      remediation:
+        - id: console
+          desc: |
+            In the STACKIT Portal, edit the SFS resource pool and restrict the IP allow-list to the specific subnets or hosts that must mount its shares.
+        - id: terraform
+          desc: |
+            Set `ip_acl` on the `stackit_sfs_resource_pool` resource to the specific subnets that must mount the pool's shares, excluding `0.0.0.0/0` and `::/0`:
+
+            ```hcl
+            resource "stackit_sfs_resource_pool" "example" {
+              project_id        = var.project_id
+              name              = "secure-resourcepool"
+              availability_zone = "eu01-m"
+              performance_class = "Standard"
+              size_gigabytes    = 512
+              ip_acl = [
+                "10.0.0.0/8",
+                "192.168.100.0/24",
+              ]
+            }
+            ```
+    refs:
+      - url: https://docs.stackit.cloud/products/storage/file-storage/
+        title: STACKIT Documentation - File Storage (SFS)
+  - uid: mondoo-stackit-security-sfs-export-policy-restricted
+    title: Ensure STACKIT SFS export policies do not allow world-open NFS access
+    impact: 85
+    filters: asset.platform == "stackit-project"
+    mql: |
+      stackit.sfs.exportPolicies.all(rules.all(ipAcl.none(_ == "0.0.0.0/0" || _ == "::/0")))
+    docs:
+      desc: |
+        This check ensures that no STACKIT File Storage (SFS) export policy rule grants NFS access to the entire internet (`0.0.0.0/0` or `::/0`). Export policies define which clients may mount shares and with what access; a rule open to the world removes the network boundary protecting the data.
+
+        **Why this matters**
+
+        - **Broad share exposure:** A world-open export rule lets any reachable host mount the share.
+        - **Lateral movement:** Overly broad NFS access can aid an attacker pivoting within the environment.
+      remediation:
+        - id: console
+          desc: |
+            In the STACKIT Portal, edit the export policy and replace any `0.0.0.0/0` rule with specific client CIDRs that require access.
+        - id: terraform
+          desc: |
+            Scope each rule's `ip_acl` on the `stackit_sfs_export_policy` resource to specific client CIDRs, excluding `0.0.0.0/0` and `::/0`:
+
+            ```hcl
+            resource "stackit_sfs_export_policy" "example" {
+              project_id = var.project_id
+              name       = "secure-policy"
+              rules = [
+                {
+                  order  = 1
+                  ip_acl = ["10.0.0.0/8", "172.16.0.0/24"]
+                }
+              ]
+            }
+            ```
+    refs:
+      - url: https://docs.stackit.cloud/products/storage/file-storage/
+        title: STACKIT Documentation - File Storage (SFS)
+  - uid: mondoo-stackit-security-sfs-resourcepool-snapshot-policy
+    title: Ensure STACKIT SFS resource pools have a snapshot policy attached
+    impact: 50
+    filters: asset.platform == "stackit-project"
+    mql: |
+      stackit.sfs.resourcePools.all(snapshotPolicyId != "")
+    docs:
+      desc: |
+        This check ensures that STACKIT File Storage (SFS) resource pools have a snapshot policy attached. Snapshot policies provide point-in-time copies of file data, supporting recovery from accidental deletion, corruption, or ransomware.
+
+        **Why this matters**
+
+        - **Recoverability:** Snapshots enable restoration of file data after destructive events.
+        - **Ransomware resilience:** Regular snapshots provide a recovery path that does not depend on the live data.
+      remediation:
+        - id: console
+          desc: |
+            In the STACKIT Portal, attach a snapshot policy to the SFS resource pool with a schedule and retention appropriate for the data's recovery requirements.
+        - id: terraform
+          desc: |
+            Attach a snapshot policy to the `stackit_sfs_resource_pool` resource by setting the `snapshot_policy` block with the policy `id`:
+
+            ```hcl
+            resource "stackit_sfs_resource_pool" "example" {
+              project_id        = var.project_id
+              name              = "resourcepool-with-snapshot"
+              availability_zone = "eu01-m"
+              performance_class = "Standard"
+              size_gigabytes    = 512
+              ip_acl            = ["10.0.0.0/8"]
+              snapshot_policy = {
+                id = var.snapshot_policy_id
+              }
+            }
+            ```
+    refs:
+      - url: https://docs.stackit.cloud/products/storage/file-storage/
+        title: STACKIT Documentation - File Storage (SFS)
+  # ----------------------------- STACKIT Managed Databases -----------------------------
+  - uid: mondoo-stackit-security-db-postgres-acl-restricted
+    title: Ensure PostgreSQL Flex instances do not allow access from the internet
+    impact: 90
+    filters: asset.platform == "stackit-postgres-flex-instance"
+    mql: |
+      stackit.postgresFlex.instance.acl.none(_ == "0.0.0.0/0" || _ == "::/0")
+    docs:
+      desc: |
+        This check ensures that STACKIT PostgreSQL Flex instances do not include `0.0.0.0/0` in their access control list (ACL). A database reachable from the entire internet is exposed to brute-force, exploitation, and data-exfiltration attempts.
+
+        **Why this matters**
+
+        - **Direct data exposure:** A world-open database ACL puts the data one credential away from the entire internet.
+        - **Attack surface:** Internet-reachable database ports are continuously scanned and attacked.
+      remediation:
+        - id: console
+          desc: |
+            In the STACKIT Portal, edit the PostgreSQL Flex instance ACL and restrict access to the specific application subnets or hosts that require connectivity.
+        - id: terraform
+          desc: |
+            Restrict the `acl` list on the `stackit_postgresflex_instance` resource to the application subnets that require connectivity, excluding `0.0.0.0/0` and `::/0`:
+
+            ```hcl
+            resource "stackit_postgresflex_instance" "example" {
+              project_id = var.project_id
+              name       = "example-instance"
+              acl        = ["10.0.0.0/8", "192.168.0.0/16"] # not 0.0.0.0/0
+              flavor = {
+                cpu = 2
+                ram = 4
+              }
+              storage = {
+                class = "premium-perf2-stackit"
+                size  = 5
+              }
+              version = 14
+            }
+            ```
+    refs:
+      - url: https://docs.stackit.cloud/products/databases/postgresql-flex/
+        title: STACKIT Documentation - PostgreSQL Flex
+  - uid: mondoo-stackit-security-db-postgres-backups
+    title: Ensure PostgreSQL Flex instances have a backup schedule configured
+    impact: 60
+    filters: asset.platform == "stackit-postgres-flex-instance"
+    mql: |
+      stackit.postgresFlex.instance.backupSchedule != ""
+    docs:
+      desc: |
+        This check ensures that STACKIT PostgreSQL Flex instances have a backup schedule configured. Regular automated backups are essential for recovery from data loss, corruption, or ransomware.
+
+        **Why this matters**
+
+        - **Recoverability:** A backup schedule provides restore points for the database.
+        - **Business continuity:** Backups limit data loss after a destructive incident.
+      remediation:
+        - id: console
+          desc: |
+            In the STACKIT Portal, configure a backup schedule for the PostgreSQL Flex instance with a frequency and retention that meet your recovery objectives.
+        - id: terraform
+          desc: |
+            Set a cron `backup_schedule` on the `stackit_postgresflex_instance` resource so automated backups run on a defined cadence:
+
+            ```hcl
+            resource "stackit_postgresflex_instance" "example" {
+              project_id      = var.project_id
+              name            = "example-instance"
+              acl             = ["10.0.0.0/8"]
+              backup_schedule = "00 02 * * *" # daily at 02:00
+              flavor = {
+                cpu = 2
+                ram = 4
+              }
+              storage = {
+                class = "premium-perf2-stackit"
+                size  = 5
+              }
+              version = 14
+            }
+            ```
+    refs:
+      - url: https://docs.stackit.cloud/products/databases/postgresql-flex/
+        title: STACKIT Documentation - PostgreSQL Flex
+  - uid: mondoo-stackit-security-db-mongodb-acl-restricted
+    title: Ensure MongoDB Flex instances do not allow access from the internet
+    impact: 90
+    filters: asset.platform == "stackit-mongodb-flex-instance"
+    mql: |
+      stackit.mongoDbFlex.instance.acl.none(_ == "0.0.0.0/0" || _ == "::/0")
+    docs:
+      desc: |
+        This check ensures that STACKIT MongoDB Flex instances do not include `0.0.0.0/0` in their access control list (ACL). Internet-reachable databases are a primary target for data theft and extortion.
+
+        **Why this matters**
+
+        - **Direct data exposure:** A world-open ACL exposes the database to the entire internet.
+        - **Attack surface:** Open database ports are continuously scanned and attacked.
+      remediation:
+        - id: console
+          desc: |
+            In the STACKIT Portal, edit the MongoDB Flex instance ACL and restrict access to the specific application subnets or hosts that require connectivity.
+        - id: terraform
+          desc: |
+            Restrict the `acl` list on the `stackit_mongodbflex_instance` resource to the application subnets that require connectivity, excluding `0.0.0.0/0` and `::/0`:
+
+            ```hcl
+            resource "stackit_mongodbflex_instance" "example" {
+              project_id = var.project_id
+              name       = "example-instance"
+              acl        = ["10.0.0.0/8", "192.168.0.0/16"] # not 0.0.0.0/0
+              flavor = {
+                cpu = 1
+                ram = 4
+              }
+              storage = {
+                class = "premium-perf2-mongodb"
+                size  = 10
+              }
+              version = "7.0"
+            }
+            ```
+    refs:
+      - url: https://docs.stackit.cloud/products/databases/mongodb-flex/
+        title: STACKIT Documentation - MongoDB Flex
+  - uid: mondoo-stackit-security-db-mongodb-backups
+    title: Ensure MongoDB Flex instances have a backup schedule configured
+    impact: 60
+    filters: asset.platform == "stackit-mongodb-flex-instance"
+    mql: |
+      stackit.mongoDbFlex.instance.backupSchedule != ""
+    docs:
+      desc: |
+        This check ensures that STACKIT MongoDB Flex instances have a backup schedule configured. Automated backups provide recovery points after data loss, corruption, or ransomware.
+
+        **Why this matters**
+
+        - **Recoverability:** A backup schedule provides restore points for the database.
+        - **Business continuity:** Backups limit data loss after a destructive incident.
+      remediation:
+        - id: console
+          desc: |
+            In the STACKIT Portal, configure a backup schedule for the MongoDB Flex instance with a frequency and retention that meet your recovery objectives.
+        - id: terraform
+          desc: |
+            Set a cron `backup_schedule` on the `stackit_mongodbflex_instance` resource so automated backups run on a defined cadence:
+
+            ```hcl
+            resource "stackit_mongodbflex_instance" "example" {
+              project_id      = var.project_id
+              name            = "example-instance"
+              acl             = ["10.0.0.0/8"]
+              backup_schedule = "0 2 * * *" # daily at 02:00
+              flavor = {
+                cpu = 1
+                ram = 4
+              }
+              storage = {
+                class = "premium-perf2-mongodb"
+                size  = 10
+              }
+              version = "7.0"
+            }
+            ```
+    refs:
+      - url: https://docs.stackit.cloud/products/databases/mongodb-flex/
+        title: STACKIT Documentation - MongoDB Flex
+  - uid: mondoo-stackit-security-db-sqlserver-acl-restricted
+    title: Ensure SQLServer Flex instances do not allow access from the internet
+    impact: 90
+    filters: asset.platform == "stackit-sqlserver-flex-instance"
+    mql: |
+      stackit.sqlServerFlex.instance.acl.none(_ == "0.0.0.0/0" || _ == "::/0")
+    docs:
+      desc: |
+        This check ensures that STACKIT SQLServer Flex instances do not include `0.0.0.0/0` in their access control list (ACL). A database reachable from the entire internet is exposed to brute-force, exploitation, and data-exfiltration attempts.
+
+        **Why this matters**
+
+        - **Direct data exposure:** A world-open ACL exposes the database to the entire internet.
+        - **Attack surface:** Open database ports are continuously scanned and attacked.
+      remediation:
+        - id: console
+          desc: |
+            In the STACKIT Portal, edit the SQLServer Flex instance ACL and restrict access to the specific application subnets or hosts that require connectivity.
+        - id: terraform
+          desc: |
+            Restrict the `acl` list on the `stackit_sqlserverflex_instance` resource to the application subnets that require connectivity, excluding `0.0.0.0/0` and `::/0`:
+
+            ```hcl
+            resource "stackit_sqlserverflex_instance" "example" {
+              project_id = var.project_id
+              name       = "example-instance"
+              acl        = ["10.0.0.0/8", "192.168.0.0/16"] # not 0.0.0.0/0
+              flavor = {
+                cpu = 4
+                ram = 16
+              }
+              storage = {
+                class = "premium-perf2-stackit"
+                size  = 5
+              }
+              version = 2022
+            }
+            ```
+    refs:
+      - url: https://docs.stackit.cloud/products/databases/sqlserver-flex/
+        title: STACKIT Documentation - SQLServer Flex
+  - uid: mondoo-stackit-security-db-sqlserver-backups
+    title: Ensure SQLServer Flex instances have a backup schedule configured
+    impact: 60
+    filters: asset.platform == "stackit-sqlserver-flex-instance"
+    mql: |
+      stackit.sqlServerFlex.instance.backupSchedule != ""
+    docs:
+      desc: |
+        This check ensures that STACKIT SQLServer Flex instances have a backup schedule configured. Automated backups provide recovery points after data loss, corruption, or ransomware.
+
+        **Why this matters**
+
+        - **Recoverability:** A backup schedule provides restore points for the database.
+        - **Business continuity:** Backups limit data loss after a destructive incident.
+      remediation:
+        - id: console
+          desc: |
+            In the STACKIT Portal, configure a backup schedule for the SQLServer Flex instance with a frequency and retention that meet your recovery objectives.
+        - id: terraform
+          desc: |
+            Set a cron `backup_schedule` on the `stackit_sqlserverflex_instance` resource so automated backups run on a defined cadence:
+
+            ```hcl
+            resource "stackit_sqlserverflex_instance" "example" {
+              project_id      = var.project_id
+              name            = "example-instance"
+              acl             = ["10.0.0.0/8"]
+              backup_schedule = "00 02 * * *" # daily at 02:00
+              flavor = {
+                cpu = 4
+                ram = 16
+              }
+              storage = {
+                class = "premium-perf2-stackit"
+                size  = 5
+              }
+              version = 2022
+            }
+            ```
+    refs:
+      - url: https://docs.stackit.cloud/products/databases/sqlserver-flex/
+        title: STACKIT Documentation - SQLServer Flex
+  - uid: mondoo-stackit-security-db-postgres-high-availability
+    title: Ensure PostgreSQL Flex instances run with multiple replicas
+    impact: 40
+    filters: asset.platform == "stackit-postgres-flex-instance"
+    mql: |
+      stackit.postgresFlex.instance.replicas >= 2
+    docs:
+      desc: |
+        This check ensures that STACKIT PostgreSQL Flex instances run with at least two replicas, providing high availability. A single-replica instance has no automatic failover, so a node failure causes downtime and potential data loss. This mirrors the Multi-AZ / high-availability checks applied to managed databases on other clouds.
+
+        **Why this matters**
+
+        - **Failover:** Multiple replicas allow the service to survive the loss of a node without an outage.
+        - **Durability:** Replication reduces the risk of data loss from a single-node failure.
+
+        Note: Single-replica instances may be acceptable for development workloads; tune the expectation to your environment.
+      remediation:
+        - id: console
+          desc: |
+            In the STACKIT Portal, scale the PostgreSQL Flex instance to two or more replicas for production workloads.
+        - id: terraform
+          desc: |
+            Set `replicas` to at least 2 (use 3 for a replicated, highly available setup) on the `stackit_postgresflex_instance` resource:
+
+            ```hcl
+            resource "stackit_postgresflex_instance" "example" {
+              project_id      = var.project_id
+              name            = "example-instance"
+              acl             = ["10.0.0.0/8"]
+              backup_schedule = "00 02 * * *"
+              replicas        = 3 # >= 2 for high availability
+              flavor = {
+                cpu = 2
+                ram = 4
+              }
+              storage = {
+                class = "premium-perf2-stackit"
+                size  = 5
+              }
+              version = 14
+            }
+            ```
+    refs:
+      - url: https://docs.stackit.cloud/products/databases/postgresql-flex/
+        title: STACKIT Documentation - PostgreSQL Flex
+  - uid: mondoo-stackit-security-db-mongodb-high-availability
+    title: Ensure MongoDB Flex instances run with multiple replicas
+    impact: 40
+    filters: asset.platform == "stackit-mongodb-flex-instance"
+    mql: |
+      stackit.mongoDbFlex.instance.replicas >= 2
+    docs:
+      desc: |
+        This check ensures that STACKIT MongoDB Flex instances run with at least two replicas, providing high availability. A single-replica instance has no automatic failover, so a node failure causes downtime and potential data loss.
+
+        **Why this matters**
+
+        - **Failover:** Multiple replicas allow the service to survive the loss of a node without an outage.
+        - **Durability:** Replication reduces the risk of data loss from a single-node failure.
+
+        Note: Single-replica instances may be acceptable for development workloads.
+      remediation:
+        - id: console
+          desc: |
+            In the STACKIT Portal, scale the MongoDB Flex instance to two or more replicas for production workloads.
+        - id: terraform
+          desc: |
+            Set `replicas` to at least 2 (use 3 for a replica set) on the `stackit_mongodbflex_instance` resource:
+
+            ```hcl
+            resource "stackit_mongodbflex_instance" "example" {
+              project_id      = var.project_id
+              name            = "example-instance"
+              acl             = ["10.0.0.0/8"]
+              backup_schedule = "0 2 * * *"
+              replicas        = 3 # >= 2 for high availability
+              flavor = {
+                cpu = 1
+                ram = 4
+              }
+              storage = {
+                class = "premium-perf2-mongodb"
+                size  = 10
+              }
+              version = "7.0"
+              options = {
+                type = "Replica"
+              }
+            }
+            ```
+    refs:
+      - url: https://docs.stackit.cloud/products/databases/mongodb-flex/
+        title: STACKIT Documentation - MongoDB Flex
+  - uid: mondoo-stackit-security-db-sqlserver-high-availability
+    title: Ensure SQLServer Flex instances run with multiple replicas
+    impact: 40
+    filters: asset.platform == "stackit-sqlserver-flex-instance"
+    mql: |
+      stackit.sqlServerFlex.instance.replicas >= 2
+    docs:
+      desc: |
+        This check ensures that STACKIT SQLServer Flex instances run with at least two replicas, providing high availability. A single-replica instance has no automatic failover, so a node failure causes downtime and potential data loss.
+
+        **Why this matters**
+
+        - **Failover:** Multiple replicas allow the service to survive the loss of a node without an outage.
+        - **Durability:** Replication reduces the risk of data loss from a single-node failure.
+
+        Note: Single-replica instances may be acceptable for development workloads.
+      remediation:
+        - id: console
+          desc: |
+            In the STACKIT Portal, scale the SQLServer Flex instance to two or more replicas for production workloads.
+        # No Terraform remediation: on stackit_sqlserverflex_instance the `replicas` attribute is read-only and cannot be set directly — high availability is derived from the instance edition/flavor. Select an HA-capable edition via the console or API.
+    refs:
+      - url: https://docs.stackit.cloud/products/databases/sqlserver-flex/
+        title: STACKIT Documentation - SQLServer Flex
+  # ----------------------------- STACKIT Secrets Manager -----------------------------
+  - uid: mondoo-stackit-security-secretsmanager-acl-restricted
+    title: Ensure Secrets Manager instances do not allow access from the internet
+    impact: 85
+    filters: asset.platform == "stackit-secrets-manager-instance"
+    mql: |
+      stackit.secretsManager.instance.acls.none(_ == "0.0.0.0/0" || _ == "::/0")
+    docs:
+      desc: |
+        This check ensures that STACKIT Secrets Manager instances do not include `0.0.0.0/0` in their access control list. Secrets Manager stores sensitive credentials; exposing its API to the entire internet broadens the attack surface around your most sensitive data.
+
+        **Why this matters**
+
+        - **Sensitive data exposure:** Secrets Manager holds credentials whose compromise can cascade across systems.
+        - **Reduced attack surface:** Restricting the ACL limits who can even attempt to reach the secrets API.
+      remediation:
+        - id: console
+          desc: |
+            In the STACKIT Portal, edit the Secrets Manager instance access control list and restrict it to the specific subnets or hosts that require access.
+        - id: terraform
+          desc: |
+            Restrict the `acls` set (note the plural attribute name) on the `stackit_secretsmanager_instance` resource to the specific subnets that require access, excluding `0.0.0.0/0` and `::/0`:
+
+            ```hcl
+            resource "stackit_secretsmanager_instance" "example" {
+              project_id = var.project_id
+              name       = "example-instance"
+              acls       = ["10.0.0.0/8", "192.168.0.0/16"] # not 0.0.0.0/0
+            }
+            ```
+    refs:
+      - url: https://docs.stackit.cloud/products/security/secrets-manager/
+        title: STACKIT Documentation - Secrets Manager
+  # ----------------------------- STACKIT Identity & Access -----------------------------
+  - uid: mondoo-stackit-security-serviceaccount-key-bounded-validity
+    title: Ensure active service account keys have a bounded validity
+    impact: 70
+    filters: asset.platform == "stackit-project"
+    mql: |
+      stackit.serviceAccounts.all(keys.where(_['active'] == true).all(_['validUntil'] != null))
+    docs:
+      desc: |
+        This check ensures that every active service account key has an expiry (`validUntil`) set. Long-lived, non-expiring service account keys are a high-value target: if leaked, they grant programmatic access indefinitely until manually revoked.
+
+        **Why this matters**
+
+        - **Bounded exposure:** An expiry limits how long a leaked key remains usable.
+        - **Forced rotation:** Expiring keys drive regular credential rotation, reducing the blast radius of a compromise.
+      remediation:
+        - id: console
+          desc: |
+            In the STACKIT Portal, reissue service account keys with a bounded validity period and remove any active keys that never expire.
+        - id: terraform
+          desc: |
+            Issue keys with a bounded lifetime by setting `ttl_days` on the `stackit_service_account_key` resource, and remove any non-expiring keys:
+
+            ```hcl
+            resource "stackit_service_account_key" "example" {
+              project_id            = var.project_id
+              service_account_email = var.service_account_email
+              ttl_days              = 90
+            }
+            ```
+    refs:
+      - url: https://docs.stackit.cloud/platform/access-and-identity/service-accounts/
+        title: STACKIT Documentation - Service Accounts
+  - uid: mondoo-stackit-security-serviceaccount-token-bounded-validity
+    title: Ensure active service account access tokens have a bounded validity
+    impact: 70
+    filters: asset.platform == "stackit-project"
+    mql: |
+      stackit.serviceAccounts.all(accessTokens.where(_['active'] == true).all(_['validUntil'] != null))
+    docs:
+      desc: |
+        This check ensures that every active service account access token has an expiry (`validUntil`) set. Non-expiring access tokens that are leaked grant programmatic access until they are manually revoked.
+
+        **Why this matters**
+
+        - **Bounded exposure:** An expiry limits how long a leaked token remains usable.
+        - **Credential hygiene:** Enforcing expiry drives regular rotation of access tokens.
+      remediation:
+        - id: console
+          desc: |
+            In the STACKIT Portal, reissue service account access tokens with a bounded validity period and remove any active tokens that never expire.
+        # No Terraform remediation: the stackit Terraform provider has no service-account access-token resource (stackit_service_account manages only the account). Access tokens are created with a bounded validity via the console or API.
+    refs:
+      - url: https://docs.stackit.cloud/platform/access-and-identity/service-accounts/
+        title: STACKIT Documentation - Service Accounts
+  # ----------------------------- STACKIT Key Management -----------------------------
+  - uid: mondoo-stackit-security-kms-key-not-pending-deletion
+    title: Ensure STACKIT KMS keys are not scheduled for deletion
+    impact: 60
+    filters: asset.platform == "stackit-project"
+    mql: |
+      stackit.kms.keys.all(deletionDate == null)
+    docs:
+      desc: |
+        This check flags STACKIT KMS keys that have a scheduled deletion date. A key pending deletion will become permanently unusable once the date passes, which can render all data encrypted under that key unrecoverable if the deletion was unintended.
+
+        **Why this matters**
+
+        - **Irreversible data loss:** Data encrypted with a deleted KMS key cannot be decrypted.
+        - **Early detection:** Surfacing pending deletions allows the deletion to be cancelled before it is too late.
+      remediation:
+        - id: console
+          desc: |
+            In the STACKIT Portal, review keys with a scheduled deletion. If the deletion is unintended, cancel it; otherwise confirm no active data depends on the key before it is removed.
+        # No Terraform remediation: scheduling or cancelling key deletion is an imperative KMS API action, not a configurable attribute on stackit_kms_key. Cancel an unintended deletion via the console or API.
+    refs:
+      - url: https://docs.stackit.cloud/products/security/kms/
+        title: STACKIT Documentation - Key Management Service (KMS)
+  - uid: mondoo-stackit-security-kms-key-healthy-state
+    title: Ensure STACKIT KMS keys are in a healthy state
+    impact: 50
+    filters: asset.platform == "stackit-project"
+    mql: |
+      stackit.kms.keys.none(state == "errors_exist" || state == "not_available")
+    docs:
+      desc: |
+        This check flags STACKIT KMS keys that are in an error or unavailable state (`errors_exist`, `not_available`) rather than the healthy `active` state. A key that is not available cannot perform cryptographic operations, which can break encryption and decryption for any data or service relying on it.
+
+        **Why this matters**
+
+        - **Operational integrity:** A key in an error state may prevent decryption of protected data.
+        - **Early detection:** Surfacing unhealthy keys prompts investigation before dependent workloads fail.
+      remediation:
+        - id: console
+          desc: |
+            In the STACKIT Portal, investigate the key's reported state under Key Management Service and remediate the underlying issue, or rotate to a healthy key.
+        # No Terraform remediation: key health (errors_exist / not_available) is a runtime state of the key, not a configurable attribute on stackit_kms_key. Investigate and remediate via the console or API.
+    refs:
+      - url: https://docs.stackit.cloud/products/security/kms/
+        title: STACKIT Documentation - Key Management Service (KMS)
+  # ----------------------------- STACKIT Kubernetes (SKE) -----------------------------
+  - uid: mondoo-stackit-security-ske-cluster-healthy
+    title: Ensure STACKIT SKE clusters are not in an unhealthy state
+    impact: 40
+    filters: asset.platform == "stackit-ske-cluster"
+    mql: |
+      stackit.ske.cluster.status != "STATE_UNHEALTHY"
+    docs:
+      desc: |
+        This check ensures that no STACKIT Kubernetes Engine (SKE) cluster reports an unhealthy state. An unhealthy cluster may not be applying security updates, may have degraded control-plane components, and may not be enforcing intended policy. (Hibernated clusters are a valid operational state and are not flagged.)
+
+        **Why this matters**
+
+        - **Patch and policy enforcement:** An unhealthy cluster may not reliably apply updates or admission controls.
+        - **Operational visibility:** Surfacing unhealthy clusters prompts timely investigation.
+      remediation:
+        - id: console
+          desc: |
+            In the STACKIT Portal, open the SKE cluster's status details, investigate the reported condition, and remediate the underlying issue (for example a failed maintenance or node-pool problem).
+        # No Terraform remediation: cluster health (STATE_UNHEALTHY) is a runtime status reported by the SKE service, not a configurable attribute on stackit_ske_cluster. Investigate and remediate via the console or API.
+    refs:
+      - url: https://docs.stackit.cloud/products/runtime/kubernetes-engine/
+        title: STACKIT Documentation - Kubernetes Engine (SKE)
+  - uid: mondoo-stackit-security-ske-cluster-auto-update
+    title: Ensure STACKIT SKE clusters enable Kubernetes version auto-update
+    impact: 50
+    filters: asset.platform == "stackit-ske-cluster"
+    mql: |
+      stackit.ske.cluster.maintenance['autoUpdate']['kubernetesVersion'] == true
+    docs:
+      desc: |
+        This check ensures that STACKIT Kubernetes Engine (SKE) clusters have automatic Kubernetes version updates enabled in their maintenance configuration. Clusters that do not auto-update can fall behind on security patches and run unsupported Kubernetes versions.
+
+        **Why this matters**
+
+        - **Timely patching:** Auto-update ensures the cluster receives Kubernetes security fixes during its maintenance window.
+        - **Supported versions:** Staying current avoids running end-of-life Kubernetes releases that no longer receive fixes.
+      remediation:
+        - id: console
+          desc: |
+            In the STACKIT Portal, edit the SKE cluster maintenance settings and enable automatic Kubernetes version updates, choosing an appropriate maintenance time window.
+        - id: terraform
+          desc: |
+            Enable automatic Kubernetes version updates by setting `maintenance.enable_kubernetes_version_updates = true` on the `stackit_ske_cluster` resource:
+
+            ```hcl
+            resource "stackit_ske_cluster" "example" {
+              project_id = var.project_id
+              name       = "example"
+
+              # ... node_pools ...
+
+              maintenance = {
+                enable_kubernetes_version_updates = true
+              }
+            }
+            ```
+    refs:
+      - url: https://docs.stackit.cloud/products/runtime/kubernetes-engine/
+        title: STACKIT Documentation - Kubernetes Engine (SKE)
+  - uid: mondoo-stackit-security-ske-apiserver-acl-enabled
+    title: Ensure STACKIT SKE clusters restrict Kubernetes API server access
+    impact: 80
+    filters: asset.platform == "stackit-ske-cluster"
+    mql: |
+      stackit.ske.cluster.apiServerAclEnabled == true
+    docs:
+      desc: |
+        This check ensures that a STACKIT Kubernetes Engine (SKE) cluster has the API-server access-control list (ACL) enabled. With the ACL disabled, the cluster's Kubernetes API server is reachable from any source address, exposing the control plane to the entire internet.
+
+        **Why this matters**
+
+        - **Control-plane exposure:** An unrestricted API server is continuously scanned and is a primary target for credential and exploit attacks.
+        - **Defense in depth:** An IP allow-list ensures only known networks can even attempt to authenticate to the cluster.
+      remediation:
+        - id: console
+          desc: |
+            In the STACKIT Portal, open the SKE cluster settings and enable the API-server ACL, then add the CIDR ranges that should be allowed to reach the Kubernetes API.
+        - id: terraform
+          desc: |
+            Enable the API-server ACL and restrict it to known networks via the `extensions.acl` block on the `stackit_ske_cluster` resource:
+
+            ```hcl
+            resource "stackit_ske_cluster" "example" {
+              project_id = var.project_id
+              name       = "example"
+
+              # ... node_pools ...
+
+              extensions = {
+                acl = {
+                  enabled       = true
+                  allowed_cidrs = ["10.0.0.0/8"] # restrict to your admin/VPN networks
+                }
+              }
+            }
+            ```
+    refs:
+      - url: https://docs.stackit.cloud/products/runtime/kubernetes-engine/
+        title: STACKIT Documentation - Kubernetes Engine (SKE)
+  - uid: mondoo-stackit-security-ske-apiserver-acl-restricted
+    title: Ensure STACKIT SKE API server ACL is not open to the internet
+    impact: 85
+    filters: asset.platform == "stackit-ske-cluster"
+    mql: |
+      stackit.ske.cluster.apiServerAclAllowedCidrs.none(_ == "0.0.0.0/0" || _ == "::/0")
+    docs:
+      desc: |
+        This check ensures that a STACKIT Kubernetes Engine (SKE) cluster's API-server access-control list does not allow `0.0.0.0/0` or `::/0`. An allow-list that includes the entire internet provides no protection — it is equivalent to disabling the ACL while appearing to be configured.
+
+        **Why this matters**
+
+        - **False sense of security:** A world-open entry in the allow-list defeats the purpose of the ACL.
+        - **Control-plane exposure:** Any host on the internet can reach the Kubernetes API server and attempt to authenticate.
+      remediation:
+        - id: console
+          desc: |
+            In the STACKIT Portal, edit the SKE cluster's API-server ACL and replace any `0.0.0.0/0` or `::/0` entry with the specific administrative or VPN CIDRs that require access.
+        - id: terraform
+          desc: |
+            Set `extensions.acl.allowed_cidrs` on the `stackit_ske_cluster` resource to specific networks, excluding `0.0.0.0/0` and `::/0`:
+
+            ```hcl
+            resource "stackit_ske_cluster" "example" {
+              project_id = var.project_id
+              name       = "example"
+
+              # ... node_pools ...
+
+              extensions = {
+                acl = {
+                  enabled       = true
+                  allowed_cidrs = ["10.0.0.0/8", "192.168.0.0/16"] # not 0.0.0.0/0
+                }
+              }
+            }
+            ```
+    refs:
+      - url: https://docs.stackit.cloud/products/runtime/kubernetes-engine/
+        title: STACKIT Documentation - Kubernetes Engine (SKE)
+  # ----------------------------- STACKIT Telemetry -----------------------------
+  - uid: mondoo-stackit-security-telemetry-token-expiry-set
+    title: Ensure STACKIT telemetry router access tokens have an expiry
+    impact: 50
+    filters: asset.platform == "stackit-project"
+    mql: |
+      stackit.telemetry.routers.all(accessTokens.all(expiresAt != null))
+    docs:
+      desc: |
+        This check ensures that every access token issued for a STACKIT telemetry router has an expiry time set. Long-lived or non-expiring credentials increase the window of exposure if a token is leaked.
+
+        **Why this matters**
+
+        - **Bounded exposure:** Expiring tokens limit how long a leaked credential remains valid.
+        - **Credential hygiene:** Enforcing expiry encourages regular rotation.
+      remediation:
+        - id: console
+          desc: |
+            In the STACKIT Portal, reissue telemetry router access tokens with a bounded validity period and remove any non-expiring tokens.
+        - id: terraform
+          desc: |
+            Issue tokens with a bounded lifetime by setting `ttl` (in days) on the `stackit_telemetryrouter_access_token` resource:
+
+            ```hcl
+            resource "stackit_telemetryrouter_access_token" "example" {
+              project_id   = var.project_id
+              instance_id  = var.instance_id
+              region       = "eu01"
+              display_name = "telemetryrouter-access-token-example"
+              ttl          = 30
+            }
+            ```
+    refs:
+      - url: https://docs.stackit.cloud/products/logging-and-monitoring/telemetry-router/
+        title: STACKIT Documentation - Telemetry Router
+  - uid: mondoo-stackit-security-telemetry-token-not-expired
+    title: Ensure STACKIT telemetry router access tokens are not expired
+    impact: 60
+    filters: asset.platform == "stackit-project"
+    mql: |
+      stackit.telemetry.routers.all(accessTokens.all(expiresAt == null || expiresAt > time.now))
+    docs:
+      desc: |
+        This check flags expired access tokens still present on STACKIT telemetry routers. Expired tokens that are not removed represent stale credentials that should be cleaned up as part of good credential hygiene.
+
+        **Why this matters**
+
+        - **Stale credential cleanup:** Removing expired tokens reduces clutter and the chance of confusion during audits.
+        - **Hygiene:** Lingering expired credentials can mask active ones during review.
+      remediation:
+        - id: console
+          desc: |
+            In the STACKIT Portal, delete expired telemetry router access tokens and reissue new ones where access is still required.
+        # No Terraform remediation: whether a token is expired is a runtime, time-based state; keeping tokens non-expired means rotating them (recreating with a fresh ttl), an operational action rather than a configurable attribute.
+    refs:
+      - url: https://docs.stackit.cloud/products/logging-and-monitoring/telemetry-router/
+        title: STACKIT Documentation - Telemetry Router
+  # ----------------------------- STACKIT Model Serving -----------------------------
+  - uid: mondoo-stackit-security-modelserving-token-expiry-set
+    title: Ensure STACKIT Model Serving tokens have a bounded validity
+    impact: 50
+    filters: asset.platform == "stackit-project"
+    mql: |
+      stackit.modelServing.tokens.all(validUntil != null)
+    docs:
+      desc: |
+        This check ensures that every STACKIT Model Serving authentication token has a validity end date set. Non-expiring tokens increase the window of exposure if a credential is leaked.
+
+        **Why this matters**
+
+        - **Bounded exposure:** A validity end date limits how long a leaked token remains usable.
+        - **Credential hygiene:** Enforcing expiry encourages regular rotation of inference credentials.
+      remediation:
+        - id: console
+          desc: |
+            In the STACKIT Portal, reissue Model Serving tokens with a bounded validity period and remove any non-expiring tokens.
+        - id: terraform
+          desc: |
+            Issue tokens with a bounded lifetime by setting `ttl_duration` on the `stackit_modelserving_token` resource (accepts Go-style durations such as `24h`, `5h30m`):
+
+            ```hcl
+            resource "stackit_modelserving_token" "example" {
+              project_id   = var.project_id
+              name         = "example-token"
+              ttl_duration = "24h"
+            }
+            ```
+    refs:
+      - url: https://docs.stackit.cloud/products/data-and-ai/ai-model-serving/
+        title: STACKIT Documentation - Model Serving
+  - uid: mondoo-stackit-security-modelserving-token-not-expired
+    title: Ensure STACKIT Model Serving tokens are not expired
+    impact: 60
+    filters: asset.platform == "stackit-project"
+    mql: |
+      stackit.modelServing.tokens.all(validUntil == null || validUntil > time.now)
+    docs:
+      desc: |
+        This check flags expired STACKIT Model Serving tokens that are still present. Expired tokens that are not removed represent stale credentials that should be cleaned up.
+
+        **Why this matters**
+
+        - **Stale credential cleanup:** Removing expired tokens reduces clutter and audit confusion.
+        - **Hygiene:** Lingering expired credentials can obscure active ones during review.
+      remediation:
+        - id: console
+          desc: |
+            In the STACKIT Portal, delete expired Model Serving tokens and reissue new ones where access is still required.
+        # No Terraform remediation: whether a token is expired is a runtime, time-based state; keeping tokens non-expired means rotating them (recreating with a fresh ttl_duration), an operational action rather than a configurable attribute.
+    refs:
+      - url: https://docs.stackit.cloud/products/data-and-ai/ai-model-serving/
+        title: STACKIT Documentation - Model Serving

@@ -4,12 +4,14 @@
 package internal
 
 import (
-	"errors"
+	"fmt"
 	"os"
 	goruntime "runtime"
+	"runtime/debug"
 	"sync"
 	"time"
 
+	"github.com/cockroachdb/errors"
 	"github.com/rs/zerolog/log"
 	"go.mondoo.com/cnspec/v13"
 	"go.mondoo.com/mql/v13/llx"
@@ -47,7 +49,11 @@ type executionManager struct {
 
 type runQueueItem struct {
 	codeBundle *llx.CodeBundle
-	props      map[string]*llx.Result
+	// props returns the query's property values. It is invoked when the item
+	// is dequeued (not when it is queued), so a transient nil property that
+	// was upgraded to its real value while waiting in the queue is picked up.
+	// It may be nil for queries without properties.
+	props func() map[string]*llx.Result
 }
 
 func newExecutionManager(runtime llx.Runtime, runQueue chan runQueueItem,
@@ -69,17 +75,36 @@ func (em *executionManager) Start() {
 	go func() {
 		defer em.wg.Done()
 		// current is the code bundle being executed; the deferred panic
-		// reporter snapshots it at crash time so the report carries WHICH
+		// handler snapshots it at crash time so the report carries WHICH
 		// query was running, not just where the engine died. The recover
-		// stays at the goroutine top — recovering closer to the query and
-		// re-panicking would truncate the stacktrace.
+		// stays at the goroutine top so the stacktrace points at the
+		// panic site. Instead of crashing the process, the panic is
+		// reported upstream and surfaced as an unrecoverable execution
+		// error, mirroring the executeCodeBundle error path below.
+		// Like that path, the goroutine deliberately exits and takes the
+		// whole pipeline for this scan with it: after a panic the runtime
+		// state can't be trusted, so we don't keep executing the remaining
+		// queries.
 		var current *llx.CodeBundle
-		defer health.ReportPanicWithTags("cnspec", cnspec.Version, cnspec.Build, func() map[string]string {
-			if current == nil {
-				return nil
+		defer func() {
+			r := recover()
+			if r == nil {
+				return
 			}
-			return health.QueryPanicTags(current.CodeV2.GetId(), current.Source)
-		})
+			var tags map[string]string
+			if current != nil {
+				tags = health.QueryPanicTags(current.CodeV2.GetId(), current.Source)
+			}
+			stack := debug.Stack()
+			health.ReportRecoveredPanic("cnspec", cnspec.Version, cnspec.Build, r, stack, tags)
+			log.Error().
+				Str("stacktrace", string(stack)).
+				Msgf("recovered from panic during query execution: %v", r)
+			select {
+			case em.errChan <- fmt.Errorf("panic during query execution: %v", r):
+			default:
+			}
+		}()
 		for {
 			// Prioritize stopChan
 			select {
@@ -95,7 +120,11 @@ func (em *executionManager) Start() {
 				}
 				props := make(map[string]*llx.Primitive)
 				errMsg := ""
-				for k, r := range item.props {
+				var itemProps map[string]*llx.Result
+				if item.props != nil {
+					itemProps = item.props()
+				}
+				for k, r := range itemProps {
 					if r.Error != "" {
 						// This case is tricky to handle. If we cannot run the query at
 						// all, it's unclear what to report for the datapoint. If we
@@ -166,14 +195,20 @@ func (em *executionManager) executeCodeBundle(codeBundle *llx.CodeBundle, props 
 			// is not guaranteed to happen in a single thread
 			wg.Add(checksum)
 			if errMsg != "" {
-				// TODO: this is not entirely correct when looking at things as a whole.
-				// Its possible that another query executing will produce a non error.
-				// However, datapoint nodes take the first data that was reported. This
-				// issue exists in general for any query that errors
+				// The query cannot run; broadcast a typed placeholder for
+				// every codepoint so downstream consumers don't wait forever.
+				// Datapoint checksums are content-addressed and shared across
+				// queries, so a healthy query may still report a real result
+				// for the same checksum. Consumers let executed results
+				// override these placeholders and never let a placeholder
+				// override an executed result (see queryRunError).
 				sendResult(&llx.RawResult{
 					CodeID: checksum,
 					Data: &llx.RawData{
-						Error: errors.New(errMsg),
+						Error: &queryRunError{
+							originCodeID: codeBundle.CodeV2.GetId(),
+							err:          errors.New(errMsg),
+						},
 					},
 				})
 			}
