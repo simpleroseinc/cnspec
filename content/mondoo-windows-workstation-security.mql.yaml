@@ -3,7 +3,7 @@
 policies:
   - uid: mondoo-windows-workstation-security
     name: Mondoo Microsoft Windows Workstation Security
-    version: 0.5.0-simplerose
+    version: 0.5.1-simplerose
     license: BUSL-1.1
     tags:
       mondoo.com/category: security
@@ -42,7 +42,7 @@ policies:
           - uid: simplerose-windows-workstation-security-crowdstrike-installed
           - uid: mondoo-windows-workstation-security-bitlocker-enabled
           - uid: mondoo-windows-workstation-security-secure-boot-is-enabled
-    scoring_system: highest impact
+    scoring_system: average
 queries:
   - uid: mondoo-windows-workstation-security-bitlocker-enabled
     title: Ensure BitLocker Encryption is Enabled
@@ -177,7 +177,7 @@ queries:
         title: Turn on device encryption
   - uid: mondoo-windows-workstation-security-secure-boot-is-enabled
     title: Ensure Secure Boot is enabled
-    impact: 100
+    impact: 40
     tags:
       compliance/bsi-sys-1-5: false
       compliance/csa-cloud-controls-matrix-4: cloud-controls-matrix-4-ccc-06

@@ -3,7 +3,7 @@
 policies:
   - uid: mondoo-linux-workstation-security
     name: Mondoo Linux Workstation Security
-    version: 1.2.0-simplerose
+    version: 1.2.1-simplerose
     license: BUSL-1.1
     tags:
       mondoo.com/category: security
@@ -52,12 +52,12 @@ policies:
           packages.where(name == /xorg|xserver|wayland/i).any(installed)
         checks:
           - uid: simplerose-linux-workstation-security-crowdstrike-installed
-    scoring_system: highest impact
+    scoring_system: average
 queries:
 
   - uid: mondoo-linux-workstation-security-secure-boot-is-enabled
     title: Ensure Secure Boot is enabled
-    impact: 90
+    impact: 30
     tags:
       compliance/bsi-sys-1-5: false
       compliance/csa-cloud-controls-matrix-4: cloud-controls-matrix-4-ccc-06
