@@ -1,3 +1,5 @@
+# Copyright Mondoo, Inc. 2024, 2026
+# SPDX-License-Identifier: BUSL-1.1
 # SimpleRose workstation cnspec policy bundles (v1)
 # Used by NinjaOne for unregistered (--incognito) policy scans
 version: "1.0"
