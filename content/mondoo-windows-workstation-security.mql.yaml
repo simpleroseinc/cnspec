@@ -262,10 +262,7 @@ queries:
       compliance/soc2-2017: soc2-control-cc7-1-1
       compliance/vda-isa-5: vda-isa-5-5-2-1
     mql: |
-      windows.services.where(name == "wuauserv").any(running)
-        || registrykey.property(path: 'HKEY_LOCAL_MACHINE\Software\Policies\Microsoft\Windows\WindowsUpdate\AU', name: 'AUOptions') {
-          data >= 4
-        }
+      service('wuauserv').running
     docs:
       desc: |
         This check ensures that the workstation is configured to download and install Windows updates automatically on a daily schedule. Automatic updates close the gap between the release of a security fix and its application to the device.
@@ -361,7 +358,7 @@ queries:
       simplerose.com/category: endpoint-protection
     mql: |
       file("C:\\Program Files\\CrowdStrike\\CSFalconService.exe").exists
-      windows.services.where(name == "CSFalconService").all(running)
+      service('CSFalconService').running
     docs:
       desc: |
         Verifies CrowdStrike Falcon EDR is installed and the CSFalconService

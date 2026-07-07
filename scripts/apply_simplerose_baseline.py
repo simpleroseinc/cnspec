@@ -1,3 +1,5 @@
+# Copyright Mondoo, Inc. 2024, 2026
+# SPDX-License-Identifier: BUSL-1.1
 #!/usr/bin/env python3
 """Apply SimpleRose workstation baseline edits to cnspec policy bundles."""
 
@@ -48,7 +50,7 @@ def edit_windows(path: Path) -> str:
       }
 """,
         """    mql: |
-      windows.services.where(name == "wuauserv").any(running)
+      service('wuauserv').running
         || registrykey.property(path: 'HKEY_LOCAL_MACHINE\\Software\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU', name: 'AUOptions') {
           data >= 4
         }
@@ -63,7 +65,7 @@ def edit_windows(path: Path) -> str:
       simplerose.com/category: endpoint-protection
     mql: |
       file("C:\\\\Program Files\\\\CrowdStrike\\\\CSFalconService.exe").exists
-      windows.services.where(name == "CSFalconService").all(running)
+      service('CSFalconService').running
     docs:
       desc: |
         Verifies CrowdStrike Falcon EDR is installed and the CSFalconService
