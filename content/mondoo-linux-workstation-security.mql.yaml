@@ -3,7 +3,7 @@
 policies:
   - uid: mondoo-linux-workstation-security
     name: Mondoo Linux Workstation Security
-    version: 1.1.1
+    version: 1.2.0-simplerose
     license: BUSL-1.1
     tags:
       mondoo.com/category: security
@@ -38,7 +38,6 @@ policies:
           asset.family.contains('linux')
           packages.where(name == /xorg|xserver|wayland/i).any(installed)
         checks:
-          - uid: mondoo-linux-workstation-security-permissions-on-bootloader-config-are-configured
           - uid: mondoo-linux-workstation-security-secure-boot-is-enabled
       - title: Disk encryption
         filters: |
@@ -47,248 +46,15 @@ policies:
         checks:
           - uid: mondoo-linux-workstation-security-aes-encryption-algorithm
           - uid: mondoo-linux-workstation-security-root-and-home-are-encrypted
-      - title: BIOS Firmware up-to-date
+      - title: Endpoint protection
         filters: |
           asset.family.contains('linux')
-          package('fwupd').installed
           packages.where(name == /xorg|xserver|wayland/i).any(installed)
         checks:
-          - uid: mondoo-linux-workstation-security-bios-uptodate
+          - uid: simplerose-linux-workstation-security-crowdstrike-installed
     scoring_system: highest impact
 queries:
-  - uid: mondoo-linux-workstation-security-permissions-on-bootloader-config-are-configured
-    title: Ensure permissions on bootloader config are configured
-    impact: 90
-    tags:
-      compliance/bsi-sys-1-5: false
-      compliance/csa-cloud-controls-matrix-4: cloud-controls-matrix-4-iam-04
-      compliance/dora: dora-art-9
-      compliance/hipaa: hipaa-security-ss164-312-a-1-access-control
-      compliance/iso-27001-2022: iso-27001-2022-a-8-3
-      compliance/nis-2: nis-2-21-2-i
-      compliance/nist-csf-1: nist-csf-1-pr-ac-4
-      compliance/nist-csf-2: nist-csf-2-pr-aa-05
-      compliance/nist-sp-800-53-rev5: nist-sp-800-53-rev5-ac-3
-      compliance/nist-sp-800-171: nist-sp-800-171--3-1-2
-      compliance/pci-dss-4: pcidss-requirement-7-2-1
-      compliance/soc2-2017: soc2-control-cc6-1-3
-      compliance/vda-isa-5: vda-isa-5-4-1-1
-    mql: |
-      if (file("/boot/grub/grub.cfg").exists) {
-        file("/boot/grub/grub.cfg") {
-          path
-          user.name == 'root'
-          group.name == 'root'
-          permissions.group_readable == false
-          permissions.group_writeable == false
-          permissions.group_executable == false
-          permissions.other_readable == false
-          permissions.other_writeable == false
-          permissions.other_executable == false
-        }
-      }
 
-      if (file("/boot/grub/menu.lst").exists) {
-        file("/boot/grub/menu.lst") {
-          path
-          user.name == 'root'
-          group.name == 'root'
-          permissions.group_readable == false
-          permissions.group_writeable == false
-          permissions.group_executable == false
-          permissions.other_readable == false
-          permissions.other_writeable == false
-          permissions.other_executable == false
-        }
-      }
-
-      if (file("/boot/grub2/grub.cfg").exists) {
-         file("/boot/grub2/grub.cfg") {
-          path
-          user.name == 'root'
-          group.name == 'root'
-          permissions.group_readable == false
-          permissions.group_writeable == false
-          permissions.group_executable == false
-          permissions.other_readable == false
-          permissions.other_writeable == false
-          permissions.other_executable == false
-         }
-       }
-
-      if (file("/boot/grub/user.cfg").exists) {
-        file("/boot/grub/user.cfg") {
-          path
-          user.name == 'root'
-          group.name == 'root'
-          permissions.group_readable == false
-          permissions.group_writeable == false
-          permissions.group_executable == false
-          permissions.other_readable == false
-          permissions.other_writeable == false
-          permissions.other_executable == false
-        }
-      }
-
-      if (file("/boot/grub2/user.cfg").exists) {
-         file("/boot/grub2/user.cfg") {
-          path
-          user.name == 'root'
-          group.name == 'root'
-          permissions.group_readable == false
-          permissions.group_writeable == false
-          permissions.group_executable == false
-          permissions.other_readable == false
-          permissions.other_writeable == false
-          permissions.other_executable == false
-         }
-      }
-
-      if (file("/boot/loader/loader.conf").exists) {
-        file("/boot/loader/loader.conf") {
-          path
-          user.name == 'root'
-          group.name == 'root'
-          permissions.group_readable == false
-          permissions.group_writeable == false
-          permissions.group_executable == false
-          permissions.other_readable == false
-          permissions.other_writeable == false
-          permissions.other_executable == false
-        }
-      }
-
-      if(mount.list.where( fstype == 'vfat' && path == /boot/) != []) {
-        mount.list.where( fstype == 'vfat' && path == /boot/) {
-          device
-          options['fmask'] == "0077"
-        }
-      }
-    docs:
-      desc: |-
-        This check verifies that bootloader configuration files such as `grub.cfg`, `menu.lst`, `user.cfg`, and `loader.conf` are owned by `root` and are not readable or writable by group or other users. On UEFI systems, it also verifies that the `/boot/efi` vfat filesystem is mounted with `fmask=0077`.
-
-        **Why this matters**
-
-        Bootloader configuration files hold boot parameters and, in some cases, the hashed password that protects boot-time menu entries. If these files are exposed to unprivileged users, an attacker with local access can extract sensitive boot settings or alter how the system starts.
-
-        - **Protects boot-time passwords:** Restricting access prevents disclosure of the GRUB password hash that gates editing of boot entries.
-        - **Prevents boot tampering:** Read-only access for non-root users keeps attackers from injecting kernel parameters that disable security controls.
-        - **Reduces local attack surface:** Hardened permissions ensure only privileged users can inspect or modify the boot path.
-
-        The vfat filesystem used for `/boot/efi` has no native permission model, so the `fmask` mount option is used to enforce equivalent restrictions.
-      audit: |
-        Run these commands to inspect the ownership and permissions of the bootloader configuration files present on the system:
-
-        ```bash
-        stat -c '%n %U %G %A' /boot/grub/grub.cfg /boot/grub2/grub.cfg /boot/grub/menu.lst /boot/grub/user.cfg /boot/grub2/user.cfg /boot/loader/loader.conf 2>/dev/null
-        mount | grep '/boot/efi'
-        ```
-
-        A passing result shows each existing file owned by `root:root` with no group or other access, and the `/boot/efi` mount including `fmask=0077`. A failing result shows group or other access on a configuration file, or a `/boot/efi` mount without the restrictive mask.
-      remediation:
-        - id: cli
-          desc: |
-            **Using the CLI**
-
-            Bootloader configuration files must be owned by `root:root` with no group or other access. Run these commands to secure each bootloader configuration file present on the system:
-
-            ```bash
-            for f in /boot/grub/grub.cfg /boot/grub/menu.lst /boot/grub2/grub.cfg /boot/grub2/user.cfg /boot/loader/loader.conf; do
-              if [ -e "$f" ]; then
-                chown root:root "$f"
-                chmod og-rwx "$f"
-              fi
-            done
-            ```
-
-            **If the system uses UEFI**, edit `/etc/fstab` and set restrictive masks on the `/boot/efi` mount:
-
-            _Example:_
-
-            ```text
-            <device> /boot/efi vfat defaults,fmask=0077,dmask=0077,uid=0,gid=0 0 2
-            ```
-
-            Then apply the new options:
-
-            ```bash
-            mount -o remount /boot/efi
-            ```
-
-            If the remount does not apply the new options, reboot the system.
-        - id: bash
-          desc: |
-            **Using a Bash Script**
-
-            Use this Bash script to secure the bootloader configuration files:
-
-            ```bash
-            #!/bin/bash
-            set -eu
-
-            for f in /boot/grub/grub.cfg /boot/grub/menu.lst /boot/grub2/grub.cfg /boot/grub2/user.cfg /boot/loader/loader.conf; do
-              if [ -e "$f" ]; then
-                echo "Securing $f"
-                chown root:root "$f"
-                chmod og-rwx "$f"
-              fi
-            done
-
-            if findmnt -n -t vfat /boot/efi > /dev/null; then
-              if ! grep -Eq '^[^#]+[[:space:]]/boot/efi[[:space:]]+vfat[[:space:]]+\S*fmask=0077' /etc/fstab; then
-                cp -p /etc/fstab /etc/fstab.bak
-                sed -i -E 's|^(\S+\s+/boot/efi\s+vfat\s+)\S+|\1defaults,fmask=0077,dmask=0077,uid=0,gid=0|' /etc/fstab
-                mount -o remount /boot/efi
-                echo "Updated /boot/efi mount options; a backup was saved to /etc/fstab.bak"
-              fi
-            fi
-            ```
-        - id: ansible
-          desc: |
-            **Using Ansible**
-
-            Secure the bootloader configuration files with the following Ansible playbook:
-
-            ```yaml
-            ---
-            - name: Secure bootloader configuration files
-              hosts: all
-              become: true
-
-              tasks:
-                - name: Check which bootloader config files exist
-                  ansible.builtin.stat:
-                    path: "{{ item }}"
-                  loop:
-                    - /boot/grub/grub.cfg
-                    - /boot/grub/menu.lst
-                    - /boot/grub2/grub.cfg
-                    - /boot/grub2/user.cfg
-                    - /boot/loader/loader.conf
-                  register: bootloader_files
-
-                - name: Set ownership and permissions on bootloader config files
-                  ansible.builtin.file:
-                    path: "{{ item.stat.path }}"
-                    owner: root
-                    group: root
-                    mode: '0600'
-                  loop: "{{ bootloader_files.results | selectattr('stat.exists') | list }}"
-
-                - name: Set restrictive masks for /boot/efi in /etc/fstab
-                  ansible.builtin.replace:
-                    path: /etc/fstab
-                    regexp: '^(\S+\s+/boot/efi\s+vfat\s+)\S+'
-                    replace: '\1defaults,fmask=0077,dmask=0077,uid=0,gid=0'
-                  when: ansible_mounts | selectattr('mount', 'equalto', '/boot/efi') | list | length > 0
-
-                - name: Remount /boot/efi with the new options
-                  ansible.posix.mount:
-                    path: /boot/efi
-                    state: remounted
-                  when: ansible_mounts | selectattr('mount', 'equalto', '/boot/efi') | list | length > 0
-            ```
   - uid: mondoo-linux-workstation-security-secure-boot-is-enabled
     title: Ensure Secure Boot is enabled
     impact: 90
@@ -487,100 +253,14 @@ queries:
             cryptsetup luksDump "$DEVICE"
             ```
         # No bash or ansible remediation: cipher conversion is an offline, data-rewriting procedure that must not be automated against a running system.
-  - uid: mondoo-linux-workstation-security-bios-uptodate
-    title: Ensure system BIOS is running the latest available version
-    impact: 60
+  - uid: simplerose-linux-workstation-security-crowdstrike-installed
+    title: Ensure CrowdStrike Falcon is installed and running
+    impact: 90
     tags:
-      compliance/bsi-sys-1-5: false
-      compliance/csa-cloud-controls-matrix-4: cloud-controls-matrix-4-tvm-03
-      compliance/dora: dora-art-9
-      compliance/hipaa: false
-      compliance/iso-27001-2022: iso-27001-2022-a-8-8
-      compliance/nis-2: nis-2-21-2-e
-      compliance/nist-csf-1: nist-csf-1-pr-ip-12
-      compliance/nist-csf-2: nist-csf-2-pr-ps-02
-      compliance/nist-sp-800-53-rev5: nist-sp-800-53-rev5-si-2
-      compliance/nist-sp-800-171: nist-sp-800-171--3-14-1
-      compliance/pci-dss-4: pcidss-requirement-6-3-3
-      compliance/soc2-2017: soc2-control-cc7-1-1
-      compliance/vda-isa-5: vda-isa-5-5-2-1
+      simplerose.com/category: endpoint-protection
     mql: |
-      parse.json(content: command('fwupdmgr get-updates -y --json').stdout).params["Devices"].length == 0
+      file("/opt/CrowdStrike/falconctl").exists
+      command("systemctl is-active falcon-sensor").stdout.trim == "active"
     docs:
       desc: |
-        This check verifies that no firmware updates are pending for the system, using `fwupdmgr` to confirm the BIOS is running the latest available version. The `fwupd` daemon contacts the Internet to retrieve the latest firmware metadata.
-
-        **Why this matters**
-
-        Firmware sits below the operating system and is a high-value target. Outdated BIOS firmware can carry unpatched vulnerabilities that allow persistent, OS-independent compromise.
-
-        - **Closes firmware vulnerabilities:** Applying vendor updates remediates known flaws in the BIOS.
-        - **Maintains platform trust:** Current firmware keeps Secure Boot and other platform protections effective.
-        - **Reduces persistent-threat risk:** Patched firmware limits an attacker's ability to establish footholds that survive a reinstall.
-      audit: |
-        Run this command to check for pending firmware updates:
-
-        ```bash
-        fwupdmgr get-updates --json
-        ```
-
-        A passing result reports no devices with available updates. A failing result lists one or more devices, including the system BIOS, with a newer firmware version available.
-      remediation:
-        - id: cli
-          desc: |
-            **Using the CLI**
-
-            The BIOS firmware should be updated to the latest version available from the Linux Vendor Firmware Service. Refresh the metadata first so the update check reflects the latest releases:
-
-            ```bash
-            fwupdmgr refresh --force
-            fwupdmgr get-updates
-            fwupdmgr update
-            ```
-
-            BIOS updates are staged and installed during the next boot. Reboot the system when prompted to complete the update.
-
-            If the `fwupdmgr` tool is not available, you may need to download the latest BIOS firmware from your hardware vendor's website and follow their instructions to update it.
-        - id: bash
-          desc: |
-            **Using a Bash Script**
-
-            Use this Bash script to refresh firmware metadata and stage any available updates:
-
-            ```bash
-            #!/bin/bash
-            set -eu
-
-            fwupdmgr refresh --force
-            if fwupdmgr get-updates; then
-              fwupdmgr update -y --no-reboot-check
-              echo "Firmware updates staged. Reboot the system to complete installation."
-            else
-              echo "No firmware updates available."
-            fi
-            ```
-        - id: ansible
-          desc: |
-            **Using Ansible**
-
-            Update the system BIOS firmware using fwupdmgr with the following Ansible playbook:
-
-            ```yaml
-            ---
-            - name: Update system BIOS firmware
-              hosts: all
-              become: true
-
-              tasks:
-                - name: Refresh fwupd metadata
-                  ansible.builtin.command: fwupdmgr refresh --force
-                  changed_when: true
-
-                - name: Apply firmware updates
-                  ansible.builtin.command: fwupdmgr update -y --no-reboot-check
-                  register: fwupd_result
-                  changed_when: "'Successfully installed' in fwupd_result.stdout"
-                  failed_when:
-                    - fwupd_result.rc != 0
-                    - "'No upgrades for' not in fwupd_result.stderr"
-            ```
+        Matches linux_normalize.sh: falconctl present and falcon-sensor service active.

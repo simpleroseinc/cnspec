@@ -3,7 +3,7 @@
 policies:
   - uid: mondoo-windows-workstation-security
     name: Mondoo Microsoft Windows Workstation Security
-    version: 0.4.2
+    version: 0.5.0-simplerose
     license: BUSL-1.1
     tags:
       mondoo.com/category: security
@@ -38,8 +38,8 @@ policies:
           asset.platform.contains("windows")
           windows.computerInfo['OsProductType'] == 1
         checks:
-          - uid: mondoo-windows-workstation-security-antivirus-installed
           - uid: mondoo-windows-workstation-security-automatic-update-is-enabled
+          - uid: simplerose-windows-workstation-security-crowdstrike-installed
           - uid: mondoo-windows-workstation-security-bitlocker-enabled
           - uid: mondoo-windows-workstation-security-secure-boot-is-enabled
     scoring_system: highest impact
@@ -262,12 +262,10 @@ queries:
       compliance/soc2-2017: soc2-control-cc7-1-1
       compliance/vda-isa-5: vda-isa-5-5-2-1
     mql: |
-      registrykey.property(path: 'HKEY_LOCAL_MACHINE\Software\Policies\Microsoft\Windows\WindowsUpdate\AU', name: 'AUOptions') {
-        data >= 4
-      }
-      registrykey.property(path: 'HKEY_LOCAL_MACHINE\Software\Policies\Microsoft\Windows\WindowsUpdate\AU', name: 'ScheduledInstallDay') {
-        data == 0
-      }
+      windows.services.where(name == "wuauserv").any(running)
+        || registrykey.property(path: 'HKEY_LOCAL_MACHINE\Software\Policies\Microsoft\Windows\WindowsUpdate\AU', name: 'AUOptions') {
+          data >= 4
+        }
     docs:
       desc: |
         This check ensures that the workstation is configured to download and install Windows updates automatically on a daily schedule. Automatic updates close the gap between the release of a security fix and its application to the device.
@@ -356,162 +354,15 @@ queries:
         title: Manage additional Windows Update settings
       - url: https://learn.microsoft.com/de-de/security-updates/windowsupdateservices/18127499
         title: Configure Automatic Updates in a Non–Active Directory Environment
-  - uid: mondoo-windows-workstation-security-antivirus-installed
-    title: Ensure AntiVirus is installed, enabled and up-to-date
+  - uid: simplerose-windows-workstation-security-crowdstrike-installed
+    title: Ensure CrowdStrike Falcon is installed and running
     impact: 100
     tags:
-      compliance/bsi-sys-1-5: false
-      compliance/csa-cloud-controls-matrix-4: cloud-controls-matrix-4-tvm-03
-      compliance/dora: dora-art-9
-      compliance/hipaa: false
-      compliance/iso-27001-2022: iso-27001-2022-a-8-7
-      compliance/nis-2: nis-2-21-2-e
-      compliance/nist-csf-1: nist-csf-1-de-cm-4
-      compliance/nist-csf-2: nist-csf-2-de-cm-09
-      compliance/nist-sp-800-53-rev5: nist-sp-800-53-rev5-si-3
-      compliance/nist-sp-800-171: nist-sp-800-171--3-14-2
-      compliance/pci-dss-4: pcidss-requirement-6-3-3
-      compliance/soc2-2017: soc2-control-cc6-8-4
-      compliance/vda-isa-5: vda-isa-5-5-2-1
+      simplerose.com/category: endpoint-protection
     mql: |
-      windows.security.products.any(
-        type == "antivirus" &&
-        productState == "ON" &&
-        signatureState == "UP-TO-DATE" &&
-        time.now - timestamp < 25 * time.hour
-      )
+      file("C:\\Program Files\\CrowdStrike\\CSFalconService.exe").exists
+      windows.services.where(name == "CSFalconService").all(running)
     docs:
       desc: |
-        This check ensures that an antivirus product is installed, actively running, and using threat signatures updated within the last 25 hours. Current signatures and active scanning are what allow the product to recognize and block recent malware.
-
-        **Why this matters**
-
-        - **Real-time protection:** Active antivirus scans files as they are accessed, downloaded, or executed, blocking threats before they can run.
-        - **Malware defense:** Antivirus products detect viruses, trojans, worms, spyware, and ransomware that would otherwise compromise data or disable the system.
-        - **Fresh detection:** Up-to-date signatures are required to recognize newly released malware variants; stale signatures leave the device blind to current threats.
-        - **Baseline control:** Endpoint malware protection is a fundamental security control expected by every major hardening benchmark.
-      audit: |
-        ### Audit via Windows Security
-
-        1. Open **Windows Security** and select **Virus & threat protection**.
-        2. Confirm that real-time protection is on and review the **Protection updates** date.
-
-        The workstation passes when an antivirus product is enabled and its definitions are current. It fails if protection is off or the definitions are out of date.
-
-        ### Audit via PowerShell
-
-        1. Open an elevated PowerShell session.
-        2. Display the antivirus product status:
-
-           ```powershell
-           Get-MpComputerStatus | Select-Object AMServiceEnabled, RealTimeProtectionEnabled, AntivirusSignatureLastUpdated
-           ```
-
-        The workstation passes when the antivirus service and real-time protection are enabled and the signatures were updated within the last 25 hours. It fails if protection is disabled or the signatures are older than 25 hours.
-      remediation:
-        - id: gui
-          desc: |
-            **Using the Windows interface**
-
-            If a third-party antivirus product is installed, enable its real-time protection and update its definitions using that product's console. The steps below enable Microsoft Defender Antivirus. Active malware protection is what blocks threats as files are accessed, so the goal is to confirm real-time protection is on and signatures are current.
-
-            The Windows Security path is the supported route on modern Windows because it works whether or not Tamper Protection is enabled.
-
-            1. Open **Windows Security** and select **Virus & threat protection**.
-            2. Under **Virus & threat protection settings**, select **Manage settings**.
-            3. Turn **Real-time protection** on.
-            4. Return to **Virus & threat protection**, open **Protection updates**, and select **Check for updates** so the signatures are current.
-
-            **Using Group Policy (Tamper Protection must be off)**
-
-            Tamper Protection blocks changes to Microsoft Defender settings made through Group Policy, PowerShell, or the registry. The steps in this section and the PowerShell commands below only take effect when Tamper Protection is turned off. If Tamper Protection is on, use the Windows Security steps above instead.
-
-            1. Select the Start menu.
-            2. In the search bar, type Group Policy. Then select Edit Group Policy from the listed results. The Local Group Policy Editor opens.
-            3. Select Computer Configuration > Administrative Templates > Windows Components > Microsoft Defender Antivirus.
-            4. Scroll to the bottom of the list and select Turn off Microsoft Defender Antivirus.
-            5. Select Disabled or Not configured. The names suggest that you are turning Microsoft Defender Antivirus off, but selecting Disabled or Not configured keeps it turned on.
-            6. Select Apply > OK.
-            7. Open Windows Security > Virus & threat protection > Protection updates and select Check for updates so the signatures are current.
-
-            With Tamper Protection off, you can also run these commands one at a time in an elevated PowerShell session:
-
-            ```powershell
-            Set-MpPreference -DisableRealtimeMonitoring $false
-            Set-MpPreference -DisableIOAVProtection $false
-            New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender" -Name "Real-Time Protection" -Force
-            New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection" -Name "DisableBehaviorMonitoring" -Value 0 -PropertyType DWORD -Force
-            New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection" -Name "DisableOnAccessProtection" -Value 0 -PropertyType DWORD -Force
-            New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection" -Name "DisableScanOnRealtimeEnable" -Value 0 -PropertyType DWORD -Force
-            New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender" -Name "DisableAntiSpyware" -Value 0 -PropertyType DWORD -Force
-            Start-Service WinDefend
-            Start-Service WdNisSvc
-            Update-MpSignature
-            ```
-        - id: ansible
-          desc: |
-            **Using Ansible**
-
-            Enable Microsoft Defender Antivirus using the following Ansible playbook:
-
-            ```yaml
-            ---
-            - name: Enable Microsoft Defender Antivirus
-              hosts: all
-
-              tasks:
-                - name: Ensure Real-Time Protection registry key exists
-                  ansible.windows.win_regedit:
-                    path: HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection
-                    state: present
-
-                - name: Disable DisableBehaviorMonitoring
-                  ansible.windows.win_regedit:
-                    path: HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection
-                    name: DisableBehaviorMonitoring
-                    data: 0
-                    type: dword
-
-                - name: Disable DisableOnAccessProtection
-                  ansible.windows.win_regedit:
-                    path: HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection
-                    name: DisableOnAccessProtection
-                    data: 0
-                    type: dword
-
-                - name: Disable DisableScanOnRealtimeEnable
-                  ansible.windows.win_regedit:
-                    path: HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection
-                    name: DisableScanOnRealtimeEnable
-                    data: 0
-                    type: dword
-
-                - name: Disable DisableAntiSpyware
-                  ansible.windows.win_regedit:
-                    path: HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender
-                    name: DisableAntiSpyware
-                    data: 0
-                    type: dword
-
-                - name: Enable real-time monitoring via PowerShell
-                  ansible.windows.win_powershell:
-                    script: |
-                      Set-MpPreference -DisableRealtimeMonitoring $false
-                      Set-MpPreference -DisableIOAVProtection $false
-
-                - name: Start Windows Defender services
-                  ansible.windows.win_service:
-                    name: "{{ item }}"
-                    state: started
-                  loop:
-                    - WinDefend
-                    - WdNisSvc
-
-                - name: Update Defender signatures
-                  ansible.windows.win_powershell:
-                    script: |
-                      Update-MpSignature
-            ```
-    refs:
-      - url: https://learn.microsoft.com/en-us/mem/intune/user-help/turn-on-defender-windows
-        title: Turn on Microsoft Defender Antivirus to access company resources
+        Verifies CrowdStrike Falcon EDR is installed and the CSFalconService
+        is running. Matches SimpleRose normalize (windows_normalize.ps1).
