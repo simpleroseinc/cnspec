@@ -3,7 +3,7 @@
 policies:
   - uid: mondoo-macos-security
     name: Mondoo macOS Security
-    version: 1.6.0-simplerose
+    version: 1.6.1-simplerose
     license: BUSL-1.1
     tags:
       mondoo.com/category: security
@@ -1392,7 +1392,7 @@ queries:
       compliance/soc2-2017: soc2-control-cc6-6-4
       compliance/vda-isa-5: vda-isa-5-5-2-6
     mql: |
-      command("/usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate").stdout.contains("enabled")
+      command("/usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate").stdout.contains(/State = 1/)
     docs:
       desc: |
         This check ensures that the firewall is enabled on macOS systems to block unwanted incoming connections and enhance system security.
@@ -1797,7 +1797,7 @@ queries:
       compliance/soc2-2017: soc2-control-cc6-8-1
       compliance/vda-isa-5: vda-isa-5-5-2-1
     mql: |
-      service('com.apple.nfsd').running == false
+      command("/bin/launchctl print system/com.apple.nfsd").stdout.contains("state = not running")
     docs:
       desc: |
         This check ensures that the NFS server is disabled on macOS systems to prevent unauthorized file sharing and mitigate security risks.
@@ -1894,7 +1894,7 @@ queries:
       compliance/soc2-2017: soc2-control-cc7-1-1
       compliance/vda-isa-5: vda-isa-5-5-2-1
     mql: |
-      command("softwareupdate --schedule 2>/dev/null").stdout.contains(/Automatic checking.*on/i)
+      command("/usr/sbin/softwareupdate --schedule").stdout.contains("turned on")
     docs:
       desc: |
         This check ensures that automatic checking for software updates is enabled on macOS systems to keep the system up to date with the latest patches and security updates.
